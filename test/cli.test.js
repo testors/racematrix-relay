@@ -35,4 +35,13 @@ test('operator CLI creates persistent registry and private exports; idempotence 
   run('device-bind', '--source-uid', roaming.source_public_uid, '--circuit-id', '1');
   run('device-bind', '--source-uid', roaming.source_public_uid, '--auto');
   assert.equal(JSON.parse(run('list')).credentials.find(c => c.source_uid === roaming.source_public_uid).circuit_id, null);
+  const phoneFile = `${directory}/phone.json`;
+  const phoneSummary = run('mobile-invite', '--base-url', 'https://relay.example.test', '--output', phoneFile);
+  const invitation = JSON.parse(readFileSync(phoneFile));
+  assert.equal(invitation.relay_url, 'https://relay.example.test');
+  assert.equal(statSync(phoneFile).mode & 0o777, 0o600);
+  assert.equal(phoneSummary.includes(invitation.activation_code), false);
+  assert.equal(invitation.source_secret, undefined);
+  assert.match(invitation.activation_code, /^[A-Za-z0-9_-]{32}$/);
+  assert.throws(() => run('mobile-invite', '--base-url', 'https://relay.example.test', '--output', phoneFile));
 });
