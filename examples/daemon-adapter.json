@@ -1,0 +1,13 @@
+{
+  "id": "gps-relay",
+  "kind": "racematrix-relay",
+  "enabled": true,
+  "baseUrl": "https://relay.example.com",
+  "circuitId": 1,
+  "credentialUid": "replace-with-gateway-credential-uid",
+  "credentialSecret": "replace-with-gateway-credential-secret",
+  "publishFlags": true,
+  "syncLayout": true,
+  "flagSourceAdapterId": "x2-link",
+  "circuitRadiusM": 150
+}

@@ -1,0 +1,27 @@
+{
+  "description": "Public interoperability test key; never provision a real device with it",
+  "session_id": 305419896,
+  "sequence": 42,
+  "key_hex": "000102030405060708090a0b0c0d0e0f",
+  "gps_time": "2026-09-19T12:34:56.200000Z",
+  "time_us": 1789821296200000,
+  "longitude_e7": 1273001000,
+  "latitude_e7": 375001000,
+  "heading_cdeg": 12345,
+  "speed_ckph": 1852,
+  "valid": 7,
+  "rmc": "$GNRMC,123456.200,A,3730.0060,N,12718.0060,E,10.00,123.45,190926,,,A*4A",
+  "plain_packet_hex": "bb4222002a0000000102785634124049923ed55b06002874e04ba80f5a1639303c07070000000000000000000000000000000000",
+  "nonce_hex": "785634122a0000000202000000000000",
+  "packet_hex": "bb4222002a000000010278563412ff2c722d4a989c4270281ee22053e69d90ccf1b8e2d923640998b6d4b9c3e095edb3a5ddd3b9",
+  "session_request": {
+    "credential_uid": "TSC_TEST_VECTOR",
+    "hardware_uid": "esp32:aabbccddeeff",
+    "nonce": "00112233445566778899aabbccddeeff00",
+    "preferred_circuit_id": "42",
+    "source_type": "esp32",
+    "timestamp": "2026-09-19T12:34:56Z"
+  },
+  "source_secret": "public-test-secret",
+  "session_signature": "Zrtu5Rmt37Sl/3J3C9qi3uG+jcaj5u+DU+6KdtGwcRE="
+}

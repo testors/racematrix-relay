@@ -1,0 +1,27 @@
+[Unit]
+Description=RaceMatrix GPS and flags relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=racematrix-relay
+Group=racematrix-relay
+WorkingDirectory=/opt/racematrix-relay
+ExecStart=/usr/bin/node /opt/racematrix-relay/src/main.js
+Environment=RELAY_DATA_DIR=/var/lib/racematrix-relay
+Environment=RELAY_HOST=127.0.0.1
+Environment=RELAY_UDP_HOST=0.0.0.0
+StateDirectory=racematrix-relay
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

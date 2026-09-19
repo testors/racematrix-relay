@@ -1,0 +1,38 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, statSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = fileURLToPath(new URL('../', import.meta.url));
+
+test('operator CLI creates persistent registry and private exports; idempotence and overwrite guards', t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'rm-relay-cli-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const run = (...args) => execFileSync(process.execPath, ['bin/relay.js', ...args, '--data-dir', `${directory}/data`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const circuit = JSON.parse(run('circuit-put', '--circuit-id', '1', '--name', 'CLI test', '--layout', 'examples/layout.json'));
+  assert.match(circuit.layoutHash, /^[a-f0-9]{64}$/);
+  const output = `${directory}/gps.json`;
+  const summary = run('device-provision', '--hardware-uid', 'esp32:aabbccddeeff', '--circuit-id', '1', '--number', '7', '--output', output);
+  const first = JSON.parse(readFileSync(output));
+  assert.match(first.source_public_uid, /^SRC-[0-9A-HJKMNP-TV-Z]{6}$/);
+  assert.equal(statSync(output).mode & 0o777, 0o600); assert.equal(summary.includes(first.source_secret), false);
+  const second = `${directory}/gps-again.json`;
+  run('device-provision', '--hardware-uid', 'esp32:aabbccddeeff', '--circuit-id', '1', '--output', second);
+  assert.deepEqual(JSON.parse(readFileSync(second)), first);
+  assert.throws(() => run('device-provision', '--hardware-uid', 'esp32:aabbccddeeff', '--circuit-id', '1', '--rotate', '--output', output));
+  run('device-bind', '--source-uid', first.source_public_uid, '--circuit-id', '1', '--number', '8');
+  const listing = JSON.parse(run('list')); assert.equal(listing.credentials[0].number, '8'); assert.equal(listing.credentials[0].secret, undefined);
+  run('gateway-provision', '--circuit-id', '1', '--name', 'Publisher', '--publish', '--output', `${directory}/gateway.json`);
+  assert.throws(() => run('gateway-provision', '--circuit-id', '1', '--name', 'Other', '--publish', '--output', `${directory}/other.json`));
+  run('revoke', '--credential-uid', first.credential_uid);
+  assert.throws(() => run('device-provision', '--hardware-uid', 'esp32:aabbccddeeff', '--circuit-id', '1', '--output', `${directory}/revoked.json`));
+  run('circuit-create', '--circuit-id', '2', '--name', 'Second circuit');
+  run('device-provision', '--hardware-uid', 'esp32:111111111111', '--output', `${directory}/roaming.json`);
+  const roaming = JSON.parse(readFileSync(`${directory}/roaming.json`)); assert.equal(roaming.circuit_id, null);
+  run('device-number', '--source-uid', roaming.source_public_uid, '--circuit-id', '2', '--number', '42');
+  assert.equal(JSON.parse(run('list')).deviceNumbers[0].number, '42');
+  run('device-bind', '--source-uid', roaming.source_public_uid, '--circuit-id', '1');
+  run('device-bind', '--source-uid', roaming.source_public_uid, '--auto');
+  assert.equal(JSON.parse(run('list')).credentials.find(c => c.source_uid === roaming.source_public_uid).circuit_id, null);
+});

@@ -1,0 +1,19 @@
+{
+  "name": "racematrix-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "relay": "node bin/relay.js",
+    "test": "node --test --test-timeout=15000 test/*.test.js",
+    "check": "node --check src/main.js && node --check src/server.js && node --check src/store.js && node --check src/protocol.js && node --check src/layout.js && node --check src/routing.js && node --check bin/relay.js",
+    "test:daemon": "node --test scripts/integration-daemon.js"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  }
+}

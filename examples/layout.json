@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "layoutId": "example-track-replace-before-use",
+  "revision": 1,
+  "zones": [
+    { "id": "zone-1", "kind": "path", "widthM": 14,
+      "points": [[375000000, 1273000000], [375010000, 1273000000]] },
+    { "id": "zone-2", "kind": "path", "widthM": 14,
+      "points": [[375010000, 1273000000], [375010000, 1273010000]] }
+  ]
+}
