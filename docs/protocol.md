@@ -98,6 +98,19 @@ POST /v1/device/enroll
 - A revoked device that enrolls again (after a reset, with any key) becomes `pending` under its previous `SRC-...` ID and loses owner, binding and numbers.
 - Enrollment shares the per-address limit of mobile activation (20/min) and at most 256 devices may be pending.
 
+### Modem and SIM labels
+
+```http
+POST /v1/device/info
+Authorization: Bearer <device access_token>
+{"modem_imei":"863235087085013","sim_iccid":"8982052504122918948","sim_phone_tail":"3047"}
+200 {"success":true}
+```
+
+A device may describe its modem and SIM after each session so an operator can match a physical unit: IMEI (14-17 digits),
+ICCID (18-22 digits) and only the last four digits of the SIM's phone number. A longer phone number is refused, not truncated.
+Each report replaces the previous one; an absent value clears it. The values are self-reported labels and never an authentication input.
+
 ## Device management over the gateway stream
 
 A gateway (`role: "gateway"`) whose `hello` lists `capabilities: ["device-admin-v1"]` may manage devices for its own circuit:
@@ -111,12 +124,12 @@ A gateway (`role: "gateway"`) whose `hello` lists `capabilities: ["device-admin-
 | `op` | `args` | Rule |
 | --- | --- | --- |
 | `devices.list` | none | registered devices this circuit owns, has fixed, has numbered, or currently hosts on track; pending devices whose last position (≤10 min) is inside this circuit's coverage |
-| `devices.approve` | `sourceUid` (listed pending device) or `hardwareUid` (ID read off the unit; also un-rejects), optional `label`, `number` | the approving circuit becomes the owner |
+| `devices.approve` | `sourceUid` (listed pending device), or `imei` / `hardwareUid` (read off the unit; also un-rejects), optional `label`, `number` | the approving circuit becomes the owner; an IMEI reported by several pending units is refused |
 | `devices.reject` | `sourceUid` | listed pending device |
 | `devices.update` | `sourceUid`, `label` and/or `number` (`null` clears) | `label` owner only; `number` is this circuit's personal-flag number |
 | `devices.revoke` | `sourceUid` | owner only |
 
-Each device is `{sourceUid, hardwareUid, label, kind, status, owned, fixedCircuitId, number, online, lastSeenMs, createdMs, onTrack, position}`;
+Each device is `{sourceUid, hardwareUid, imei, iccid, phoneTail, label, kind, status, owned, fixedCircuitId, number, online, lastSeenMs, createdMs, onTrack, position}`;
 keys are never returned. `online` means a control stream is open or the device authenticated/sent GPS within 90 s. Malformed requests close the stream;
 refused operations answer `ok:false`. A device or a non-gateway peer sending `admin.request` is disconnected.
 Devices provisioned by CLI have no owner until `device-owner` assigns one; a fixed-circuit device without an owner is managed by its circuit.

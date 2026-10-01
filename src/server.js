@@ -163,7 +163,7 @@ export class Relay {
           etag: `"${hash}"`, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' });
         res.end(body); return;
       }
-      if (req.method !== 'POST' || !['/api/v1/telemetry/session', '/v1/gateway/session', '/v1/mobile/activate', '/v1/device/enroll'].includes(req.url)) throw fail(404, 'not found');
+      if (req.method !== 'POST' || !['/api/v1/telemetry/session', '/v1/gateway/session', '/v1/mobile/activate', '/v1/device/enroll', '/v1/device/info'].includes(req.url)) throw fail(404, 'not found');
       if (req.url === '/v1/mobile/activate' || req.url === '/v1/device/enroll') {
         const ip = req.socket.remoteAddress ?? 'unknown', now = this.now();
         let entry = this.activationRate.get(ip);
@@ -187,6 +187,15 @@ export class Relay {
         try { credential = this.store.redeemMobile(payload?.activation_code, payload?.claim_nonce, this.now()); }
         catch { throw fail(401, 'invalid or expired invitation'); }
         json(201, { success: true, ...credential }); return;
+      }
+      if (req.url === '/v1/device/info') {
+        const identity = this.bearer(req);
+        if (!identity || identity.role !== 'device') throw fail(401, 'unauthorized');
+        const value = key => payload?.[key] === undefined || payload[key] === null || payload[key] === '' ? null : payload[key];
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw fail(400, 'invalid device information');
+        this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail') });
+        this.credentialCache.delete(identity.uid);
+        json(200, { success: true }); return;
       }
       if (req.url === '/v1/device/enroll') {
         let enrolled;
@@ -369,6 +378,7 @@ export class Relay {
       const seen = this.seen.get(row.uid), fix = seen?.fix;
       const connected = [...this.peers].some(p => p.role === 'device' && p.uid === row.uid);
       return { sourceUid: row.source_uid, hardwareUid: row.hardware_uid, label: row.label, kind: row.hardware_uid.startsWith('mobile:') ? 'mobile' : 'esp32',
+        imei: row.imei ?? null, iccid: row.iccid ?? null, phoneTail: row.phone_tail ?? null,
         status: row.status === PENDING ? 'pending' : 'active', owned: owned(row), fixedCircuitId: row.circuit_id,
         number: row.circuit_id === circuitId ? row.number : numbers.get(row.source_uid) ?? null,
         online: connected || (!!seen && now - seen.seenMs <= ONLINE_MS), lastSeenMs: seen?.seenMs ?? null, createdMs: row.created_ms ?? null,
@@ -397,7 +407,13 @@ export class Relay {
     }
     if (op === 'devices.approve') {
       let row;
-      if (args.hardwareUid !== undefined) {
+      if (args.imei !== undefined) {
+        // Same claim by the number printed on the modem. It is self-reported,
+        // so two units claiming one IMEI are left for the hardware ID.
+        const rows = this.store.devicesByImei(text(args.imei, /^[0-9]{14,17}$/)).filter(r => !r.revoked && [PENDING, REJECTED].includes(r.status));
+        if (rows.length !== 1) throw fail(rows.length ? 409 : 404, rows.length ? 'several pending devices report this IMEI' : 'no pending device with this IMEI');
+        row = rows[0];
+      } else if (args.hardwareUid !== undefined) {
         // The operator read the ID off the unit: claim it even without a position.
         const mac = text(args.hardwareUid, /^(esp32:)?[0-9a-fA-F]{2}([:-]?[0-9a-fA-F]{2}){5}$/).replace(/^esp32:/, '').replace(/[:-]/g, '').toLowerCase();
         row = this.store.deviceByHardware(`esp32:${mac}`);
