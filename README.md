@@ -95,6 +95,25 @@ node bin/relay.js revoke --credential-uid cred_...
 권한 변경은 활성 연결에 약 1초 내 반영된다. ESP32의 다음 HTTPS 갱신(정상 주기 약 60초)에서 새 할당을 받는다.
 공장 NVS에 Relay 서킷 ID를 고정하지 않으므로 변경 시 USB 재기록이 필요 없다.
 
+## USB 없이 기기 등록 (자체 등록)
+
+기본 Relay 주소가 포함된 펌웨어의 ESP32는 공장 NVS가 없으면 첫 부팅에 자체 키를 만들고 `POST /v1/device/enroll`로 접속한다.
+Relay는 이 기기를 **승인 대기**로 기록한다. 대기 기기의 위치는 인증·수신하지만 어떤 서킷에도 배정하거나 전달하지 않는다.
+
+- 승인은 Ops의 **Infra → GPS** 탭에서 한다. daemon의 `racematrix-relay` 어댑터가 gateway 연결로 기기 목록을 받고 관리 명령을 전달한다.
+- 서킷의 Ops에는 그 서킷 범위 안에 위치한 대기 기기만 보인다. 위치가 없는 기기는 본체의 하드웨어 ID를 입력해 등록한다.
+- 승인한 서킷이 소유자다. 이름 변경과 폐기는 소유 서킷만, 다른 서킷은 방문한 기기의 자기 서킷 차량 번호만 바꾼다.
+- 자체 등록 기기는 GPS 자동 서킷 선택으로 동작하므로, 서킷의 daemon이 레이아웃을 발행(`syncLayout`)하고 있어야 위치가 전달된다.
+- 폐기한 기기는 초기화 후 다시 접속하면 같은 `SRC-...` ID의 승인 대기로 돌아온다. 거부한 기기는 하드웨어 ID로만 등록할 수 있다.
+- 한 하드웨어 ID에 처음 접속한 키가 유지된다. 다른 키의 접속은 거부하며, USB로 등록한 기기의 서버 발급 키는 자체 등록으로 바꿀 수 없다.
+
+CLI로도 처리할 수 있다.
+
+```sh
+node bin/relay.js device-approve --hardware-uid esp32:aabbccddeeff --circuit-id 1 --name 'GPS 7'
+node bin/relay.js device-owner --source-uid SRC-... --circuit-id 1   # CLI로 등록한 기기에 소유 서킷 지정
+```
+
 ## Android·iOS 스마트폰 등록
 
 `../racematrix-gps-device/apps/mobile` 앱도 같은 UDP 위치/WSS 플래그 채널을 사용한다.

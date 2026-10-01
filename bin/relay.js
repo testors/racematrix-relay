@@ -13,6 +13,8 @@ const usage = `Usage: node bin/relay.js COMMAND [options]
   gateway-provision --circuit-id ID --name NAME --output PRIVATE.json [--publish]
   mobile-invite --base-url https://RELAY --output PRIVATE.json [--udp-port 8677 --ttl-minutes 30 --circuit-id ID --name NAME]
   device-bind --source-uid SRC-... (--auto | --circuit-id ID [--number 7])
+  device-approve --hardware-uid esp32:MAC [--circuit-id OWNER --name NAME]
+  device-owner --source-uid SRC-... [--circuit-id OWNER]
   device-number --source-uid SRC-... --circuit-id ID [--number 7]
   publisher-bind --circuit-id ID --credential-uid gateway_...
   revoke --credential-uid UID
@@ -47,12 +49,18 @@ try {
   } else if (command === 'device-bind') {
     if (v.auto && v['circuit-id'] !== undefined) throw new Error('--auto and --circuit-id are mutually exclusive');
     store.bindDevice(v['source-uid'], v.auto ? null : circuitId, v.number ?? null);
-  } else if (command === 'device-number') store.setDeviceNumber(v['source-uid'], circuitId, v.number ?? null);
+  } else if (command === 'device-approve') {
+    const row = store.deviceByHardware(v['hardware-uid']);
+    if (!row) throw new Error('unknown hardware UID');
+    store.approveDevice(row.uid, v['circuit-id'] === undefined ? null : circuitId, v.name ?? null);
+    console.log(JSON.stringify({ sourcePublicUid: row.source_uid }));
+  } else if (command === 'device-owner') store.setDeviceOwner(v['source-uid'], v['circuit-id'] === undefined ? null : circuitId);
+  else if (command === 'device-number') store.setDeviceNumber(v['source-uid'], circuitId, v.number ?? null);
   else if (command === 'publisher-bind') store.bindPublisher(circuitId, v['credential-uid']);
   else if (command === 'revoke') store.revoke(v['credential-uid']);
   else if (command === 'list') console.log(JSON.stringify({
     circuits: store.db.prepare('SELECT * FROM circuits ORDER BY id').all(),
-    credentials: store.db.prepare('SELECT uid,role,circuit_id,hardware_uid,source_uid,number,label,generation,revoked FROM credentials ORDER BY uid').all(),
+    credentials: store.db.prepare('SELECT uid,role,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id FROM credentials ORDER BY uid').all(),
     deviceNumbers: store.db.prepare('SELECT source_uid,circuit_id,number FROM device_numbers ORDER BY circuit_id,source_uid').all(),
   }, null, 2));
   else throw new Error('unknown command');

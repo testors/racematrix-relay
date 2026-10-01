@@ -1,10 +1,15 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { randomBytes, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
+import { randomBytes, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import { normalizeLayout } from './layout.js';
 
 const SOURCE_UID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+// credentials.status: a self-enrolled device waits for an operator before any
+// of its positions reach a circuit. Rejected hardware cannot enroll again.
+export const ACTIVE = 0, PENDING = 1, REJECTED = 2;
+const MAX_PENDING = 256;
+const fail = (status, message) => Object.assign(new Error(message), { status });
 
 export class Store {
   constructor(directory) {
@@ -45,6 +50,11 @@ export class Store {
     if (!this.db.prepare('PRAGMA table_info(mobile_invites)').all().some(c => c.name === 'credential_generation')) {
       this.db.exec('ALTER TABLE mobile_invites ADD COLUMN credential_generation INTEGER NOT NULL DEFAULT 1');
     }
+    // Added after the table rebuild above so old registries migrate unchanged.
+    const columns = new Set(this.db.prepare('PRAGMA table_info(credentials)').all().map(c => c.name));
+    if (!columns.has('status')) this.db.exec('ALTER TABLE credentials ADD COLUMN status INTEGER NOT NULL DEFAULT 0');
+    if (!columns.has('owner_circuit_id')) this.db.exec('ALTER TABLE credentials ADD COLUMN owner_circuit_id INTEGER');
+    if (!columns.has('created_ms')) this.db.exec('ALTER TABLE credentials ADD COLUMN created_ms INTEGER');
   }
   seal(secret) {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.key, iv);
@@ -176,6 +186,58 @@ export class Store {
     const row = this.credential(uid);
     if (!row || row.revoked || row.role !== 'gateway' || row.circuit_id !== circuitId) throw new Error('invalid publisher');
     this.db.prepare('UPDATE circuits SET publisher_uid=? WHERE id=?').run(uid, circuitId);
+  }
+  devices() {
+    return this.db.prepare(`SELECT uid,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id,created_ms
+      FROM credentials WHERE role='device' ORDER BY source_uid`).all();
+  }
+  deviceBySource(sourceUid) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND source_uid=?").get(sourceUid); }
+  deviceByHardware(hardwareUid) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND hardware_uid=?").get(hardwareUid); }
+  deviceNumbers(circuitId) {
+    return new Map(this.db.prepare('SELECT source_uid,number FROM device_numbers WHERE circuit_id=?').all(circuitId).map(r => [r.source_uid, r.number]));
+  }
+  // The device chooses its own key on first boot and presents it over TLS.
+  // The first key seen for a hardware ID is kept; an operator still has to
+  // approve the device before it is routed anywhere.
+  enrollDevice({ hardwareUid, secret, now = Date.now() }) {
+    if (typeof hardwareUid !== 'string' || !/^esp32:[a-f0-9]{12}$/.test(hardwareUid) ||
+        typeof secret !== 'string' || !/^[A-Za-z0-9_-]{43,127}$/.test(secret)) throw fail(400, 'invalid enrollment');
+    return this.transaction(() => {
+      let row = this.deviceByHardware(hardwareUid);
+      if (!row) {
+        if (this.db.prepare("SELECT COUNT(*) AS n FROM credentials WHERE role='device' AND status=? AND revoked=0").get(PENDING).n >= MAX_PENDING) throw fail(503, 'enrollment capacity');
+        const uid = `cred_${randomBytes(12).toString('hex')}`;
+        this.db.prepare('INSERT INTO credentials(uid,role,secret,circuit_id,hardware_uid,source_uid,number,label,status,created_ms) VALUES(?,?,?,NULL,?,?,NULL,?,?,?)')
+          .run(uid, 'device', this.seal(secret), hardwareUid, this.allocateSourceUid(), 'GPS', PENDING, now);
+        row = this.credential(uid);
+      } else if (row.revoked) {
+        // A revoked device that was reset comes back as a new request under its old public ID.
+        this.db.prepare('UPDATE credentials SET secret=?,status=?,revoked=0,generation=generation+1,circuit_id=NULL,number=NULL,owner_circuit_id=NULL,created_ms=? WHERE uid=?')
+          .run(this.seal(secret), PENDING, now, row.uid);
+        this.db.prepare('DELETE FROM device_numbers WHERE source_uid=?').run(row.source_uid);
+        row = this.credential(row.uid);
+      } else {
+        if (row.status === REJECTED) throw fail(403, 'enrollment rejected');
+        const stored = Buffer.from(this.unseal(row.secret)), offered = Buffer.from(secret);
+        if (stored.length !== offered.length || !timingSafeEqual(stored, offered)) throw fail(409, 'hardware is registered with another key');
+      }
+      return { credential_uid: row.uid, source_public_uid: row.source_uid, registration: row.status === PENDING ? 'pending' : 'active' };
+    });
+  }
+  approveDevice(uid, ownerCircuitId, label = null) {
+    if ((ownerCircuitId !== null && !this.circuit(ownerCircuitId)) || (label !== null && (typeof label !== 'string' || !label || label.length > 80))) throw new Error('invalid approval');
+    const result = this.db.prepare(`UPDATE credentials SET status=?,owner_circuit_id=?,label=COALESCE(?,label)
+      WHERE uid=? AND role='device' AND revoked=0 AND status IN (?,?)`).run(ACTIVE, ownerCircuitId, label, uid, PENDING, REJECTED);
+    if (!result.changes) throw new Error('no pending device');
+  }
+  rejectDevice(uid) {
+    if (!this.db.prepare("UPDATE credentials SET status=?,generation=generation+1 WHERE uid=? AND role='device' AND status=?").run(REJECTED, uid, PENDING).changes) throw new Error('no pending device');
+  }
+  setDeviceLabel(uid, label) {
+    if (typeof label !== 'string' || !label || label.length > 80 || !this.db.prepare("UPDATE credentials SET label=? WHERE uid=? AND role='device'").run(label, uid).changes) throw new Error('invalid label');
+  }
+  setDeviceOwner(sourceUid, circuitId) {
+    if ((circuitId !== null && !this.circuit(circuitId)) || !this.db.prepare("UPDATE credentials SET owner_circuit_id=? WHERE source_uid=? AND role='device'").run(circuitId, sourceUid).changes) throw new Error('invalid owner');
   }
   revoke(uid) {
     if (!this.db.prepare('UPDATE credentials SET revoked=1,generation=generation+1 WHERE uid=?').run(uid).changes) throw new Error('unknown credential');

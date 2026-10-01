@@ -5,11 +5,13 @@ import { randomBytes } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { decodeGps, verifySignature, validateFlags, canonicalJson, MAX_AGE_MS, LEASE_MS, WS_PROTOCOL, TOKEN_PREFIX, HASH } from './protocol.js';
 import { normalizeLayout } from './layout.js';
-import { CircuitRouter } from './routing.js';
+import { CircuitRouter, covers } from './routing.js';
+import { PENDING, REJECTED } from './store.js';
 
 const MAX_PEERS = 4096, MAX_SESSIONS = 8192, MAX_TOKENS = 16384, MAX_NONCES = 65536;
 const TOKEN_MS = 300000, SESSION_MS = 900000;
 const LAYOUT_LEASE_MS = 5000;
+const ONLINE_MS = 90000, PENDING_FIX_MS = 600000, MAX_LISTED = 500;
 const emptyFlags = () => ({ fullCourse: null, zones: [], personal: [] });
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
@@ -45,6 +47,7 @@ export class Relay {
     this.sessions = new Map(); this.tokens = new Map(); this.nonces = new Map(); this.rate = new Map(); this.activationRate = new Map();
     this.latest = new Map(); this.peers = new Set(); this.publishers = new Map(); this.flags = new Map(); this.credentialCache = new Map();
     this.router = new CircuitRouter();
+    this.seen = new Map(); this.layoutCache = new Map();
     this.stats = { gpsAccepted: 0, gpsRejected: 0, flagChanges: 0, flagExpired: 0, authRejected: 0 };
     this.server = tls ? https.createServer(tls) : http.createServer();
     this.server.requestTimeout = 10000; this.server.headersTimeout = 10000; this.server.keepAliveTimeout = 5000;
@@ -85,7 +88,7 @@ export class Relay {
   }
   authorized(identity) {
     const row = this.credential(identity.uid);
-    return row && !row.revoked && row.generation === identity.generation && row.circuit_id === (identity.roaming ? null : identity.circuitId);
+    return row && !row.revoked && row.status !== REJECTED && row.generation === identity.generation && row.circuit_id === (identity.roaming ? null : identity.circuitId);
   }
   deviceContext(identity) {
     if (!identity.roaming) return identity;
@@ -109,7 +112,7 @@ export class Relay {
         !/^[A-Za-z0-9_-]{16,128}$/.test(payload.nonce)) throw fail(401, 'invalid authentication');
     const timestamp = Date.parse(payload.timestamp);
     const row = this.credential(payload.credential_uid);
-    if (!Number.isFinite(timestamp) || Math.abs(timestamp - this.now()) > 300000 || !row || row.revoked || row.role !== role ||
+    if (!Number.isFinite(timestamp) || Math.abs(timestamp - this.now()) > 300000 || !row || row.revoked || row.status === REJECTED || row.role !== role ||
         !verifySignature(this.store.unseal(row.secret), payload)) throw fail(401, 'invalid authentication');
     const nonce = `${row.uid}:${payload.nonce}`;
     if (this.nonces.has(nonce)) throw fail(401, 'replayed nonce');
@@ -160,8 +163,8 @@ export class Relay {
           etag: `"${hash}"`, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' });
         res.end(body); return;
       }
-      if (req.method !== 'POST' || !['/api/v1/telemetry/session', '/v1/gateway/session', '/v1/mobile/activate'].includes(req.url)) throw fail(404, 'not found');
-      if (req.url === '/v1/mobile/activate') {
+      if (req.method !== 'POST' || !['/api/v1/telemetry/session', '/v1/gateway/session', '/v1/mobile/activate', '/v1/device/enroll'].includes(req.url)) throw fail(404, 'not found');
+      if (req.url === '/v1/mobile/activate' || req.url === '/v1/device/enroll') {
         const ip = req.socket.remoteAddress ?? 'unknown', now = this.now();
         let entry = this.activationRate.get(ip);
         if (!entry) {
@@ -185,6 +188,13 @@ export class Relay {
         catch { throw fail(401, 'invalid or expired invitation'); }
         json(201, { success: true, ...credential }); return;
       }
+      if (req.url === '/v1/device/enroll') {
+        let enrolled;
+        try { enrolled = this.store.enrollDevice({ hardwareUid: payload?.hardware_uid, secret: payload?.enroll_secret, now: this.now() }); }
+        catch (error) { throw error.status ? error : fail(400, 'invalid enrollment'); }
+        this.credentialCache.delete(enrolled.credential_uid);
+        json(201, { success: true, ...enrolled }); return;
+      }
       const role = req.url === '/v1/gateway/session' ? 'gateway' : 'device';
       const row = this.authenticate(payload, role);
       if (role === 'device' && (payload.hardware_uid !== row.hardware_uid || payload.source_type !== (row.hardware_uid.startsWith('mobile:') ? 'mobile' : 'esp32') ||
@@ -202,7 +212,9 @@ export class Relay {
         const key = randomBytes(16), epoch = randomBytes(12).toString('hex');
         this.sessions.set(id, { id, key, epoch, uid: row.uid, generation: row.generation, circuitId: row.circuit_id,
           roaming: identity.roaming, sourceUid: row.source_uid, lastSequence: -1, expires: this.now() + SESSION_MS });
-        Object.assign(result, { session_id: id, session_key: key.toString('base64'), expires_in: SESSION_MS / 1000, source_public_uid: row.source_uid });
+        Object.assign(result, { session_id: id, session_key: key.toString('base64'), expires_in: SESSION_MS / 1000, source_public_uid: row.source_uid,
+          registration: row.status === PENDING ? 'pending' : 'active' });
+        this.touch(row.uid);
       }
       json(201, result);
     } catch (error) {
@@ -251,7 +263,7 @@ export class Relay {
     peer.out.put('hello', { type: 'hello', schemaVersion: 1, circuitId: peer.circuitId, epoch: peer.epoch,
       circuitName: circuit?.name ?? null,
       role: peer.role, sourcePublicUid: peer.sourceUid, canPublish: peer.canPublish, layoutHash: peer.layoutHash,
-      expiresAtMs: peer.expires, leaseMs: LEASE_MS });
+      expiresAtMs: peer.expires, leaseMs: LEASE_MS, ...(peer.role === 'gateway' ? { capabilities: ['device-admin-v1'] } : {}) });
     if (peer.canPublish) {
       this.publishers.set(peer.circuitId, peer); this.router.layouts.delete(peer.circuitId);
       this.invalidateFlags(peer.circuitId); this.refreshRoutes();
@@ -271,6 +283,12 @@ export class Relay {
     }
     session.lastSequence = sample.sequence;
     sample.receivedAtMs = this.now();
+    this.touch(session.uid, sample);
+    if (this.credential(session.uid)?.status === PENDING) {
+      // Kept only for the operator's approval list; never routed to a circuit.
+      this.latest.set(session.sourceUid, { ...sample, sourcePublicUid: session.sourceUid, circuitId: 0, roaming: true });
+      this.stats.gpsAccepted++; return;
+    }
     const circuitId = session.roaming ? this.router.observe(session.sourceUid, sample, this.now()) : session.circuitId;
     Object.assign(sample, { sourcePublicUid: session.sourceUid, epoch: session.epoch, circuitId, roaming: !!session.roaming,
       eventId: `relay:${session.sourceUid}:${session.epoch}:${sample.sequence}`, receivedAtMs: this.now() });
@@ -281,6 +299,7 @@ export class Relay {
   }
   message(peer, message) {
     if (message?.type === 'snapshot.request') { this.sendSnapshot(peer); return; }
+    if (message?.type === 'admin.request') { this.adminRequest(peer, message); return; }
     if (['layout.publish', 'layout.heartbeat', 'layout.withdraw'].includes(message?.type)) { this.layoutMessage(peer, message); return; }
     if (!peer.canPublish || this.publishers.get(peer.circuitId) !== peer ||
         this.store.circuit(peer.circuitId).publisher_uid !== peer.uid || message.epoch !== peer.epoch ||
@@ -308,6 +327,114 @@ export class Relay {
         layoutHash: previous.layoutHash, validUntilMs: previous.validUntilMs,
       });
     } else throw new Error('unsupported message');
+  }
+  touch(uid, sample = null) {
+    const entry = this.seen.get(uid) ?? { seenMs: 0, fix: null };
+    entry.seenMs = this.now();
+    if (sample && Number.isInteger(sample.latitudeE7)) entry.fix = { latitudeE7: sample.latitudeE7, longitudeE7: sample.longitudeE7,
+      speedCkph: sample.speedCkph, timestampUs: sample.timestampUs, receivedAtMs: this.now() };
+    this.seen.set(uid, entry);
+  }
+  circuitLayout(circuitId) {
+    const live = this.router.layouts.get(circuitId);
+    if (live) return live.layout;
+    const hash = this.store.circuit(circuitId)?.layout_hash;
+    if (!hash) return null;
+    if (this.layoutCache.get(circuitId)?.hash !== hash) this.layoutCache.set(circuitId, { hash, layout: JSON.parse(this.store.layout(hash)) });
+    return this.layoutCache.get(circuitId).layout;
+  }
+  // Device management for the Ops/daemon pair of one circuit. A gateway sees
+  // its own devices, visitors currently on its track, and unapproved devices
+  // whose last position is inside its coverage.
+  adminRequest(peer, message) {
+    if (peer.role !== 'gateway' || typeof message.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(message.id) ||
+        typeof message.op !== 'string' || (message.args !== undefined && (!message.args || typeof message.args !== 'object' || Array.isArray(message.args)))) throw new Error('invalid admin request');
+    let body;
+    try { body = { ok: true, result: this.admin(peer.circuitId, message.op, message.args ?? {}) }; }
+    catch (error) { body = { ok: false, error: error.status ? error.message : 'request failed' }; }
+    peer.out.put(`admin:${message.id}`, { type: 'admin.response', schemaVersion: 1, id: message.id, ...body });
+  }
+  admin(circuitId, op, args) {
+    const now = this.now(), layout = this.circuitLayout(circuitId);
+    let numbers = this.store.deviceNumbers(circuitId);
+    const text = (value, pattern) => { if (typeof value !== 'string' || !pattern.test(value)) throw fail(400, 'invalid argument'); return value; };
+    const owned = row => row.owner_circuit_id === circuitId || (row.owner_circuit_id === null && row.circuit_id === circuitId);
+    const here = row => {
+      const fix = this.seen.get(row.uid)?.fix;
+      return !!fix && !!layout && now - fix.receivedAtMs <= PENDING_FIX_MS && covers(layout, fix);
+    };
+    const visible = row => !row.revoked && (row.status === PENDING ? here(row) :
+      row.status !== REJECTED && (owned(row) || row.circuit_id === circuitId || numbers.has(row.source_uid) || this.router.circuit(row.source_uid) === circuitId));
+    const view = row => {
+      const seen = this.seen.get(row.uid), fix = seen?.fix;
+      const connected = [...this.peers].some(p => p.role === 'device' && p.uid === row.uid);
+      return { sourceUid: row.source_uid, hardwareUid: row.hardware_uid, label: row.label, kind: row.hardware_uid.startsWith('mobile:') ? 'mobile' : 'esp32',
+        status: row.status === PENDING ? 'pending' : 'active', owned: owned(row), fixedCircuitId: row.circuit_id,
+        number: row.circuit_id === circuitId ? row.number : numbers.get(row.source_uid) ?? null,
+        online: connected || (!!seen && now - seen.seenMs <= ONLINE_MS), lastSeenMs: seen?.seenMs ?? null, createdMs: row.created_ms ?? null,
+        onTrack: row.status === PENDING ? here(row) : this.router.circuit(row.source_uid) === circuitId || (row.circuit_id === circuitId && here(row)),
+        position: fix ? { latitude: fix.latitudeE7 / 1e7, longitude: fix.longitudeE7 / 1e7,
+          speedKph: fix.speedCkph === null ? null : fix.speedCkph / 100, timestampMs: Math.round(fix.timestampUs / 1000), receivedAtMs: fix.receivedAtMs } : null };
+    };
+    const changed = row => {
+      this.credentialCache.delete(row.uid); numbers = this.store.deviceNumbers(circuitId);
+      return view(this.store.credential(row.uid));
+    };
+    const device = () => {
+      const row = this.store.deviceBySource(text(args.sourceUid, /^SRC[-_][A-Za-z0-9_-]{1,35}$/));
+      if (!row || !visible(row)) throw fail(404, 'unknown device');
+      return row;
+    };
+    const number = () => args.number === null ? null : text(args.number, /^[A-Za-z0-9-]{1,16}$/);
+    const setNumber = (row, value) => {
+      if (row.circuit_id === circuitId) this.store.bindDevice(row.source_uid, circuitId, value);
+      else this.store.setDeviceNumber(row.source_uid, circuitId, value);
+    };
+    if (op === 'devices.list') {
+      const rows = this.store.devices().filter(visible).slice(0, MAX_LISTED).map(view);
+      return { circuitId, circuitName: this.store.circuit(circuitId)?.name ?? null, generatedAtMs: now,
+        devices: rows.filter(d => d.status === 'active'), pending: rows.filter(d => d.status === 'pending') };
+    }
+    if (op === 'devices.approve') {
+      let row;
+      if (args.hardwareUid !== undefined) {
+        // The operator read the ID off the unit: claim it even without a position.
+        const mac = text(args.hardwareUid, /^(esp32:)?[0-9a-fA-F]{2}([:-]?[0-9a-fA-F]{2}){5}$/).replace(/^esp32:/, '').replace(/[:-]/g, '').toLowerCase();
+        row = this.store.deviceByHardware(`esp32:${mac}`);
+        if (!row || row.revoked || ![PENDING, REJECTED].includes(row.status)) throw fail(404, 'no pending device with this hardware ID');
+      } else {
+        row = device();
+        if (row.status !== PENDING) throw fail(409, 'device is already registered');
+      }
+      const label = args.label === undefined ? null : text(args.label, /^[^\u0000-\u001f]{1,80}$/);
+      const assigned = args.number === undefined ? undefined : number();
+      this.store.approveDevice(row.uid, circuitId, label);
+      if (assigned !== undefined) this.store.setDeviceNumber(row.source_uid, circuitId, assigned);
+      return changed(row);
+    }
+    if (op === 'devices.reject') {
+      const row = device();
+      if (row.status !== PENDING) throw fail(409, 'device is already registered');
+      this.store.rejectDevice(row.uid); this.credentialCache.delete(row.uid); this.seen.delete(row.uid);
+      return { sourceUid: row.source_uid };
+    }
+    if (op === 'devices.update') {
+      const row = device();
+      if (row.status !== 0) throw fail(409, 'device is not registered');
+      if (args.label !== undefined) {
+        if (!owned(row)) throw fail(403, 'only the owning circuit can rename this device');
+        this.store.setDeviceLabel(row.uid, text(args.label, /^[^\u0000-\u001f]{1,80}$/));
+      }
+      if (args.number !== undefined) setNumber(row, number());
+      return changed(row);
+    }
+    if (op === 'devices.revoke') {
+      const row = device();
+      if (!owned(row)) throw fail(403, 'only the owning circuit can revoke this device');
+      this.store.revoke(row.uid); this.credentialCache.delete(row.uid);
+      return { sourceUid: row.source_uid };
+    }
+    throw fail(400, 'unsupported operation');
   }
   sendSnapshot(peer) {
     const circuit = this.store.circuit(peer.circuitId), state = this.flags.get(peer.circuitId);
@@ -384,6 +511,7 @@ export class Relay {
       for (const [ip, entry] of this.activationRate) if (now - entry.at > 60000) this.activationRate.delete(ip);
       for (const [uid, cached] of this.credentialCache) if (now - cached.at > 600000) this.credentialCache.delete(uid);
       for (const [uid, sample] of this.latest) if (now - sample.timestampUs / 1000 > MAX_AGE_MS) this.latest.delete(uid);
+      for (const [uid, entry] of this.seen) if (now - entry.seenMs > 86400000) this.seen.delete(uid);
       for (const [id, entry] of this.router.layouts) if (entry.until <= now || !this.publishers.has(id) ||
           this.store.circuit(id)?.layout_hash !== entry.hash) {
         this.router.layouts.delete(id); this.invalidateFlags(id);

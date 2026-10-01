@@ -78,7 +78,8 @@ test('fixed-only registry migration preserves credentials and enables roaming an
     CREATE TABLE credentials(uid TEXT PRIMARY KEY, role TEXT NOT NULL, secret TEXT NOT NULL,
       circuit_id INTEGER NOT NULL REFERENCES circuits(id), hardware_uid TEXT UNIQUE, source_uid TEXT UNIQUE,
       number TEXT, label TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0);
-    INSERT INTO credentials SELECT * FROM saved; DROP TABLE saved; PRAGMA user_version=1;`);
+    INSERT INTO credentials SELECT uid,role,secret,circuit_id,hardware_uid,source_uid,number,label,generation,revoked FROM saved;
+    DROP TABLE saved; PRAGMA user_version=1;`);
   old.close();
   store = new Store(directory);
   try {

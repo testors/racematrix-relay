@@ -79,6 +79,48 @@ Both sources send the identical encrypted GPS datagrams below. Mobile default
 uplink is 1 Hz; acquisition tolerates distinct fixes up to 2 s apart. It still
 requires three fixes over at least 400 ms and clears expired/ambiguous coverage.
 
+## Device self-enrollment
+
+An ESP32 without a USB-written factory record generates a 256-bit key on first boot and presents it once over HTTPS:
+
+```http
+POST /v1/device/enroll
+{"hardware_uid":"esp32:aabbccddeeff","source_type":"esp32","enroll_secret":"<43-127 base64url characters>"}
+201 {"success":true,"credential_uid":"cred_...","source_public_uid":"SRC-7K3M9Q","registration":"pending"}
+```
+
+- The first key seen for a hardware ID is kept (sealed like issued keys). The same key repeats idempotently; a different key gets `409`.
+  Hardware that was USB-provisioned keeps its server-issued key and cannot be taken over by enrollment.
+- A `pending` credential authenticates sessions, UDP and WSS normally and its session response carries `"registration":"pending"`,
+  but its positions are never assigned to a circuit or forwarded to a gateway, and it receives no layout or flags.
+  Approval takes effect on the running session; the device does not re-authenticate.
+- An operator rejection is sticky (`403` on enrollment, `401` on sessions) until the unit is registered by its hardware ID.
+- A revoked device that enrolls again (after a reset, with any key) becomes `pending` under its previous `SRC-...` ID and loses owner, binding and numbers.
+- Enrollment shares the per-address limit of mobile activation (20/min) and at most 256 devices may be pending.
+
+## Device management over the gateway stream
+
+A gateway (`role: "gateway"`) whose `hello` lists `capabilities: ["device-admin-v1"]` may manage devices for its own circuit:
+
+```json
+{"type":"admin.request","id":"r1","op":"devices.list","args":{}}
+{"type":"admin.response","schemaVersion":1,"id":"r1","ok":true,"result":{"circuitId":1,"circuitName":"KIC","generatedAtMs":0,"devices":[],"pending":[]}}
+{"type":"admin.response","schemaVersion":1,"id":"r2","ok":false,"error":"only the owning circuit can rename this device"}
+```
+
+| `op` | `args` | Rule |
+| --- | --- | --- |
+| `devices.list` | none | registered devices this circuit owns, has fixed, has numbered, or currently hosts on track; pending devices whose last position (≤10 min) is inside this circuit's coverage |
+| `devices.approve` | `sourceUid` (listed pending device) or `hardwareUid` (ID read off the unit; also un-rejects), optional `label`, `number` | the approving circuit becomes the owner |
+| `devices.reject` | `sourceUid` | listed pending device |
+| `devices.update` | `sourceUid`, `label` and/or `number` (`null` clears) | `label` owner only; `number` is this circuit's personal-flag number |
+| `devices.revoke` | `sourceUid` | owner only |
+
+Each device is `{sourceUid, hardwareUid, label, kind, status, owned, fixedCircuitId, number, online, lastSeenMs, createdMs, onTrack, position}`;
+keys are never returned. `online` means a control stream is open or the device authenticated/sent GPS within 90 s. Malformed requests close the stream;
+refused operations answer `ok:false`. A device or a non-gateway peer sending `admin.request` is disconnected.
+Devices provisioned by CLI have no owner until `device-owner` assigns one; a fixed-circuit device without an owner is managed by its circuit.
+
 ## GPS UDP
 
 One datagram is exactly 52 bytes, little-endian, version 2/type 2 only:
