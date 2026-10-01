@@ -65,11 +65,11 @@ node bin/relay.js list
 기존 출력 파일은 덮어쓰지 않는다. credentials는 stdout에 출력하지 않고 0600 파일로 저장한다.
 
 USB 작업 PC에서 firmware와 NVS를 기록한다. 서버와 USB PC가 같으면
-`racematrix-gps/tools/provision.py --relay-repo ...`로 등록/기록을 함께 할 수 있다.
+`racematrix-gps-device/firmware/esp32/tools/provision.py --relay-repo ...`로 등록/기록을 함께 할 수 있다.
 서로 다른 PC라면 위 장치 credential JSON을 USB PC로 안전하게 전달한다.
 
 ```sh
-cd ../racematrix-gps
+cd ../racematrix-gps-device/firmware/esp32
 python tools/provision.py --port /dev/ttyUSB0 --credentials /secure/gps-7.json \
   --base-url https://relay.example.com --udp-host udp.relay.example.com --apn internet
 ```
@@ -97,7 +97,7 @@ node bin/relay.js revoke --credential-uid cred_...
 
 ## Android·iOS 스마트폰 등록
 
-`../racematrix-mobile` 앱도 같은 UDP 위치/WSS 플래그 채널을 사용한다.
+`../racematrix-gps-device/apps/mobile` 앱도 같은 UDP 위치/WSS 플래그 채널을 사용한다.
 운영자가 발급한 초대 정보를 앱에 한 번 입력하면 이후 자동 인증한다.
 
 ```sh
@@ -140,7 +140,7 @@ Ops 또는 Circuit 서버를 릴레이가 폴링하지 않는다. 선택 완료�
 daemon이 끊어져도 자동 선택 대상에서 제외한다. 재시작 후 저장된 레이아웃만으로 자동 배정하지 않는다.
 ESP32는 WSS의 `circuit.assignment`로 서킷/레이아웃 변경을 받아 이전 플래그를 즉시 무효화하고,
 해당 레이아웃을 HTTPS로 검증·다운로드한 후 현재 플래그를 다시 받는다. UDP 인증 세션은 계속 쓸 수 있다.
-자동 선택에는 이 메시지를 지원하는 최신 `racematrix-gps` 펌웨어가 필요하다.
+자동 선택에는 이 메시지를 지원하는 최신 `racematrix-gps-device/firmware/esp32` 펌웨어가 필요하다.
 
 ## daemon 연결 및 플래그
 
