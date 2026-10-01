@@ -5,6 +5,14 @@ import { randomBytes, createCipheriv, createDecipheriv, createHash, timingSafeEq
 import { normalizeLayout } from './layout.js';
 
 const SOURCE_UID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+// 'G' + Base32 (no I/L/O/U, for printed labels); older registries issued SRC-... IDs.
+export const SOURCE_UID = /^(SRC[-_][A-Za-z0-9_-]{1,35}|G[0-9A-HJKMNP-TV-Z]{8,12})$/;
+// Eight characters are 40 bits of SHA-256. A longer form of the same digest
+// resolves the rare case of two units sharing those 40 bits.
+export function derivedSourceUid(hardwareUid, length = 8) {
+  const bits = createHash('sha256').update(`racematrix-source-uid:${hardwareUid}`).digest().readBigUInt64BE();
+  return 'G' + Array.from({ length }, (_, i) => SOURCE_UID_ALPHABET[Number((bits >> BigInt(59 - 5 * i)) & 31n)]).join('');
+}
 // credentials.status: a self-enrolled device waits for an operator before any
 // of its positions reach a circuit. Rejected hardware cannot enroll again.
 export const ACTIVE = 0, PENDING = 1, REJECTED = 2;
@@ -99,14 +107,14 @@ export class Store {
     });
     return hash;
   }
-  allocateSourceUid(random = randomBytes) {
-    // provisionDevice holds BEGIN IMMEDIATE through the insert, serializing writers.
-    const taken = this.db.prepare('SELECT 1 FROM credentials WHERE source_uid=?');
-    for (let attempt = 0; attempt < 32; attempt++) {
-      // Six unbiased Base32 characters; omit I/L/O/U for printed device labels.
-      const suffix = Array.from(random(6), byte => SOURCE_UID_ALPHABET[byte & 31]).join('');
-      const source = `SRC-${suffix}`;
-      if (!taken.get(source)) return source;
+  allocateSourceUid(hardwareUid) {
+    // The ID is a function of the hardware ID, not of this registry: a rebuilt
+    // registry gives every unit the ID that Ops entries already refer to.
+    // Callers hold BEGIN IMMEDIATE through the insert, serializing writers.
+    const owner = this.db.prepare('SELECT hardware_uid FROM credentials WHERE source_uid=?');
+    for (const length of [8, 10, 12]) {
+      const source = derivedSourceUid(hardwareUid, length), row = owner.get(source);
+      if (!row || row.hardware_uid === hardwareUid) return source;
     }
     throw new Error('could not allocate a unique device ID');
   }
@@ -123,9 +131,9 @@ export class Store {
       if (row?.revoked && !rotate) throw new Error('revoked credential; explicit --rotate is required');
       if (!row) {
         if (importCredential && (importCredential.hardware_uid !== hardwareUid || !/^[A-Za-z0-9_-]{1,79}$/.test(importCredential.credential_uid) ||
-            !/^SRC[-_][A-Za-z0-9_-]{1,35}$/.test(importCredential.source_public_uid) || !/^[A-Za-z0-9_-]{32,127}$/.test(importCredential.source_secret))) throw new Error('invalid Circuit credential import');
+            !SOURCE_UID.test(importCredential.source_public_uid) || !/^[A-Za-z0-9_-]{32,127}$/.test(importCredential.source_secret))) throw new Error('invalid Circuit credential import');
         const uid = importCredential?.credential_uid ?? `cred_${randomBytes(12).toString('hex')}`;
-        const source = importCredential?.source_public_uid ?? this.allocateSourceUid();
+        const source = importCredential?.source_public_uid ?? this.allocateSourceUid(hardwareUid);
         const secret = importCredential?.source_secret ?? randomBytes(32).toString('base64url');
         this.db.prepare('INSERT INTO credentials(uid,role,secret,circuit_id,hardware_uid,source_uid,number,label) VALUES(?,?,?,?,?,?,?,?)')
           .run(uid, 'device', this.seal(secret), circuitId, hardwareUid, source, number, label);
@@ -218,13 +226,14 @@ export class Store {
         if (this.db.prepare("SELECT COUNT(*) AS n FROM credentials WHERE role='device' AND status=? AND revoked=0").get(PENDING).n >= MAX_PENDING) throw fail(503, 'enrollment capacity');
         const uid = `cred_${randomBytes(12).toString('hex')}`;
         this.db.prepare('INSERT INTO credentials(uid,role,secret,circuit_id,hardware_uid,source_uid,number,label,status,created_ms) VALUES(?,?,?,NULL,?,?,NULL,?,?,?)')
-          .run(uid, 'device', this.seal(secret), hardwareUid, this.allocateSourceUid(), 'GPS', PENDING, now);
+          .run(uid, 'device', this.seal(secret), hardwareUid, this.allocateSourceUid(hardwareUid), 'GPS', PENDING, now);
         row = this.credential(uid);
       } else if (row.revoked) {
-        // A revoked device that was reset comes back as a new request under its old public ID.
-        this.db.prepare('UPDATE credentials SET secret=?,status=?,revoked=0,generation=generation+1,circuit_id=NULL,number=NULL,owner_circuit_id=NULL,created_ms=? WHERE uid=?')
-          .run(this.seal(secret), PENDING, now, row.uid);
+        // A revoked device that was reset comes back as a new request under the ID
+        // derived from its hardware, which also retires an older SRC-... ID.
         this.db.prepare('DELETE FROM device_numbers WHERE source_uid=?').run(row.source_uid);
+        this.db.prepare('UPDATE credentials SET secret=?,source_uid=?,status=?,revoked=0,generation=generation+1,circuit_id=NULL,number=NULL,owner_circuit_id=NULL,created_ms=? WHERE uid=?')
+          .run(this.seal(secret), this.allocateSourceUid(hardwareUid), PENDING, now, row.uid);
         row = this.credential(row.uid);
       } else {
         if (row.status === REJECTED) throw fail(403, 'enrollment rejected');

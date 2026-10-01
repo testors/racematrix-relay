@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../src/store.js';
+import { Store, derivedSourceUid } from '../src/store.js';
 import { DatabaseSync } from 'node:sqlite';
 import { layout } from './helpers.js';
 
@@ -21,33 +21,40 @@ function imported(sourceUid) {
     source_public_uid: sourceUid, source_secret: 'a'.repeat(43) };
 }
 
-test('short IDs retry collisions across circuits, including revoked devices', t => {
-  const { store } = registry(t), existing = imported('SRC-000000');
-  store.provisionDevice({ hardwareUid: existing.hardware_uid, circuitId: 1, importCredential: existing });
-  store.revoke(existing.credential_uid);
-  let attempts = 0;
-  t.mock.method(store, 'allocateSourceUid', () => Store.prototype.allocateSourceUid.call(store,
-    size => Buffer.alloc(size, attempts++ === 0 ? 0 : 1)));
-  const device = store.provisionDevice({ hardwareUid: 'esp32:111111111111', circuitId: 2 });
-  assert.equal(attempts, 2);
-  assert.equal(device.source_public_uid, 'SRC-111111');
-  assert.equal(store.credential(existing.credential_uid).source_uid, existing.source_public_uid);
-  assert.equal(store.credential(existing.credential_uid).revoked, 1);
-  assert.equal(store.credential(device.credential_uid).hardware_uid, device.hardware_uid);
+test('IDs are derived from the hardware ID, so a rebuilt registry issues the same ones', t => {
+  const first = registry(t).store, rebuilt = registry(t).store;
+  const a = first.provisionDevice({ hardwareUid: 'esp32:111111111111', circuitId: 1 });
+  assert.match(a.source_public_uid, /^G[0-9A-HJKMNP-TV-Z]{8}$/);
+  assert.equal(a.source_public_uid, derivedSourceUid('esp32:111111111111'));
+  // Another registry, another key, another way in, another order: same ID.
+  rebuilt.provisionDevice({ hardwareUid: 'esp32:222222222222' });
+  const again = rebuilt.enrollDevice({ hardwareUid: 'esp32:111111111111', secret: 'k'.repeat(43) });
+  assert.equal(again.source_public_uid, a.source_public_uid);
+  assert.notEqual(rebuilt.deviceByHardware('esp32:222222222222').source_uid, a.source_public_uid);
+  assert.notEqual(a.credential_uid, again.credential_uid);
 });
 
-test('exhausted ID collisions leave no partial device and release the transaction', t => {
-  const { store } = registry(t), existing = imported('SRC-000000');
-  store.provisionDevice({ hardwareUid: existing.hardware_uid, circuitId: 1, importCredential: existing });
-  let attempts = 0;
-  const mock = t.mock.method(store, 'allocateSourceUid', () => Store.prototype.allocateSourceUid.call(store,
-    size => { attempts++; return Buffer.alloc(size); }));
-  const options = { hardwareUid: 'esp32:111111111111', circuitId: 1 };
-  assert.throws(() => store.provisionDevice(options), /could not allocate a unique device ID/);
-  assert.equal(attempts, 32);
-  assert.equal(store.db.prepare('SELECT count(*) AS n FROM credentials').get().n, 1);
-  mock.mock.restore();
-  assert.match(store.provisionDevice(options).source_public_uid, /^SRC-[0-9A-HJKMNP-TV-Z]{6}$/);
+test('a unit whose derived ID is taken gets a longer form of the same digest; exhaustion leaves no partial device', t => {
+  const { store } = registry(t), hardwareUid = 'esp32:111111111111';
+  const squat = (length, mac) => store.provisionDevice({ hardwareUid: `esp32:${mac}`, circuitId: 1,
+    importCredential: { hardware_uid: `esp32:${mac}`, credential_uid: `cred_${mac}`, source_public_uid: derivedSourceUid(hardwareUid, length), source_secret: 'a'.repeat(43) } });
+  squat(8, 'aaaaaaaaaaa1');
+  const device = store.provisionDevice({ hardwareUid, circuitId: 2 });
+  assert.equal(device.source_public_uid, derivedSourceUid(hardwareUid, 10));
+  assert.equal(device.source_public_uid.startsWith(derivedSourceUid(hardwareUid)), true);
+  assert.deepEqual(store.provisionDevice({ hardwareUid, circuitId: 2 }), device, 'its own ID is not a collision');
+  // Revoked rows still hold their IDs.
+  const other = 'esp32:222222222222';
+  for (const [length, mac] of [[8, 'bbbbbbbbbbb1'], [10, 'bbbbbbbbbbb2'], [12, 'bbbbbbbbbbb3']]) {
+    const row = store.provisionDevice({ hardwareUid: `esp32:${mac}`, circuitId: 1,
+      importCredential: { hardware_uid: `esp32:${mac}`, credential_uid: `cred_${mac}`, source_public_uid: derivedSourceUid(other, length), source_secret: 'a'.repeat(43) } });
+    store.revoke(row.credential_uid);
+  }
+  const before = store.db.prepare('SELECT count(*) AS n FROM credentials').get().n;
+  assert.throws(() => store.provisionDevice({ hardwareUid: other, circuitId: 1 }), /could not allocate a unique device ID/);
+  assert.throws(() => store.enrollDevice({ hardwareUid: other, secret: 'k'.repeat(43) }), /could not allocate a unique device ID/);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM credentials').get().n, before);
+  assert.equal(store.provisionDevice({ hardwareUid: 'esp32:333333333333', circuitId: 1 }).source_public_uid, derivedSourceUid('esp32:333333333333'));
 });
 
 test('legacy long IDs survive import, reopening, reprovisioning and key rotation', t => {

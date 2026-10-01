@@ -9,7 +9,7 @@ test('mobile activation is single-installation, retryable, expiring, revocable a
   const f = await fixture(t);
   assert.throws(() => f.store.inviteMobile({ ...settings, baseUrl: 'http://relay.example.test' }));
   const invite = f.store.inviteMobile({ ...settings, now: f.now() });
-  assert.match(invite.source_public_uid, /^SRC-[0-9A-HJKMNP-TV-Z]{6}$/);
+  assert.match(invite.source_public_uid, /^G[0-9A-HJKMNP-TV-Z]{8}$/);
   assert.equal(invite.source_secret, undefined);
   const claim = randomBytes(32).toString('hex');
   const activate = async (code = invite.activation_code, nonce = claim) => {

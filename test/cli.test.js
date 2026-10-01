@@ -15,7 +15,7 @@ test('operator CLI creates persistent registry and private exports; idempotence 
   const output = `${directory}/gps.json`;
   const summary = run('device-provision', '--hardware-uid', 'esp32:aabbccddeeff', '--circuit-id', '1', '--number', '7', '--output', output);
   const first = JSON.parse(readFileSync(output));
-  assert.match(first.source_public_uid, /^SRC-[0-9A-HJKMNP-TV-Z]{6}$/);
+  assert.match(first.source_public_uid, /^G[0-9A-HJKMNP-TV-Z]{8}$/);
   assert.equal(statSync(output).mode & 0o777, 0o600); assert.equal(summary.includes(first.source_secret), false);
   const second = `${directory}/gps-again.json`;
   run('device-provision', '--hardware-uid', 'esp32:aabbccddeeff', '--circuit-id', '1', '--output', second);

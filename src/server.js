@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { decodeGps, verifySignature, validateFlags, canonicalJson, MAX_AGE_MS, LEASE_MS, WS_PROTOCOL, TOKEN_PREFIX, HASH } from './protocol.js';
 import { normalizeLayout } from './layout.js';
 import { CircuitRouter, covers } from './routing.js';
-import { PENDING, REJECTED } from './store.js';
+import { PENDING, REJECTED, SOURCE_UID } from './store.js';
 
 const MAX_PEERS = 4096, MAX_SESSIONS = 8192, MAX_TOKENS = 16384, MAX_NONCES = 65536;
 const TOKEN_MS = 300000, SESSION_MS = 900000;
@@ -391,7 +391,7 @@ export class Relay {
       return view(this.store.credential(row.uid));
     };
     const device = () => {
-      const row = this.store.deviceBySource(text(args.sourceUid, /^SRC[-_][A-Za-z0-9_-]{1,35}$/));
+      const row = this.store.deviceBySource(text(args.sourceUid, SOURCE_UID));
       if (!row || !visible(row)) throw fail(404, 'unknown device');
       return row;
     };

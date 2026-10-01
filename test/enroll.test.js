@@ -32,7 +32,7 @@ async function publishLayout(f, peer, value) {
 test('a device enrolls with its own key, is idempotent, and another key cannot take over the hardware ID', async t => {
   const f = await fixture(t), key = secret();
   const first = await enroll(f, 'esp32:0123456789ab', key);
-  assert.equal(first.status, 201); assert.equal(first.registration, 'pending'); assert.match(first.source_public_uid, /^SRC-[0-9A-Z]{6}$/);
+  assert.equal(first.status, 201); assert.equal(first.registration, 'pending'); assert.match(first.source_public_uid, /^G[0-9A-HJKMNP-TV-Z]{8}$/);
   assert.deepEqual(await enroll(f, 'esp32:0123456789ab', key), first);
   assert.equal((await enroll(f, 'esp32:0123456789ab', secret())).status, 409);
   assert.equal((await enroll(f, f.device.hardware_uid, secret())).status, 409, 'USB-provisioned hardware keeps its server-issued key');
@@ -109,6 +109,14 @@ test('ownership: the approving circuit renames and revokes; a visited circuit on
   // A reset unit asks again under the same public ID and has to be approved again.
   const again = await enroll(f, 'esp32:0123456789ab', secret());
   assert.equal(again.status, 201); assert.equal(again.registration, 'pending'); assert.equal(again.source_public_uid, enrolled.source_public_uid);
+  // An older SRC-... ID is retired the same way: revoke, reset, enroll.
+  const legacy = f.store.provisionDevice({ hardwareUid: 'esp32:0123456789ff', importCredential: { hardware_uid: 'esp32:0123456789ff',
+    credential_uid: 'cred_legacy', source_public_uid: 'SRC-PB3XFZ', source_secret: 'a'.repeat(43) } });
+  f.store.setDeviceNumber(legacy.source_public_uid, 1, '7');
+  f.store.revoke(legacy.credential_uid);
+  const migrated = await enroll(f, 'esp32:0123456789ff', secret());
+  assert.match(migrated.source_public_uid, /^G[0-9A-HJKMNP-TV-Z]{8}$/); assert.equal(f.store.deviceBySource('SRC-PB3XFZ'), undefined);
+  assert.equal(f.store.deviceNumber('SRC-PB3XFZ', 1), null);
   assert.equal(f.store.deviceBySource(enrolled.source_public_uid).owner_circuit_id, null);
 });
 
@@ -126,7 +134,7 @@ test('rejection is sticky, malformed admin requests close the stream, devices ca
   assert.equal((await session(f, credential)).status, 401);
   assert.deepEqual((await admin(gateway, 'devices.list')).result.pending, []);
   assert.equal((await admin(gateway, 'devices.nope')).error, 'unsupported operation');
-  assert.equal((await admin(gateway, 'devices.update', { sourceUid: 'SRC-NOPE00' })).error, 'unknown device');
+  assert.equal((await admin(gateway, 'devices.update', { sourceUid: 'G00000000' })).error, 'unknown device');
   // An operator who has the unit in hand can still take it.
   assert.equal((await admin(gateway, 'devices.approve', { hardwareUid: 'esp32:0123456789ab' })).ok, true);
 

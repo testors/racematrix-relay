@@ -86,7 +86,7 @@ An ESP32 without a USB-written factory record generates a 256-bit key on first b
 ```http
 POST /v1/device/enroll
 {"hardware_uid":"esp32:aabbccddeeff","source_type":"esp32","enroll_secret":"<43-127 base64url characters>"}
-201 {"success":true,"credential_uid":"cred_...","source_public_uid":"SRC-7K3M9Q","registration":"pending"}
+201 {"success":true,"credential_uid":"cred_...","source_public_uid":"G7K3M9Q2X","registration":"pending"}
 ```
 
 - The first key seen for a hardware ID is kept (sealed like issued keys). The same key repeats idempotently; a different key gets `409`.
@@ -95,7 +95,8 @@ POST /v1/device/enroll
   but its positions are never assigned to a circuit or forwarded to a gateway, and it receives no layout or flags.
   Approval takes effect on the running session; the device does not re-authenticate.
 - An operator rejection is sticky (`403` on enrollment, `401` on sessions) until the unit is registered by its hardware ID.
-- A revoked device that enrolls again (after a reset, with any key) becomes `pending` under its previous `SRC-...` ID and loses owner, binding and numbers.
+- `source_public_uid` is `G` plus the first 40 bits of SHA-256(`racematrix-source-uid:` + hardware ID) in Base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`): a rebuilt registry issues the same ID. If another unit holds it, the 10- or 12-character form of the same digest is used. Older `SRC-...` IDs remain valid.
+- A revoked device that enrolls again (with any key) becomes `pending` under its derived ID (retiring an older `SRC-...` ID) and loses owner, binding and numbers.
 - Enrollment shares the per-address limit of mobile activation (20/min) and at most 256 devices may be pending.
 
 ### Modem and SIM labels
