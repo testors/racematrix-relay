@@ -95,7 +95,10 @@ node bin/relay.js publisher-bind --circuit-id 1 --credential-uid gateway_...
 node bin/relay.js revoke --credential-uid cred_...
 ```
 
-권한 변경은 활성 연결에 약 1초 내 반영된다. ESP32의 다음 HTTPS 갱신(정상 주기 약 60초)에서 새 할당을 받는다.
+권한 변경은 활성 연결에 약 1초 내 반영된다. GPS 세션은 검증된 UDP 수신 때마다 15분,
+그 세션의 유효한 제어 토큰은 5분으로 만료를 연장한다. 대응 ESP32 펌웨어는 WSS로 만료 시간을
+확인해 정상 전송 중 주기적인 HTTPS 갱신을 하지 않는다. 서버 재시작·연결 장애·만료 시 재인증한다.
+이전 펌웨어/모바일의 주기 갱신도 계속 지원한다.
 공장 NVS에 Relay 서킷 ID를 고정하지 않으므로 변경 시 USB 재기록이 필요 없다.
 
 ## USB 없이 기기 등록 (자체 등록)

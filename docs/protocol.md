@@ -45,8 +45,19 @@ new Relay firmware provisioning omits this hint to allow server-side reassignmen
 ```
 
 Devices also receive `session_id` (uint32), `session_key` (base64 16 random bytes),
-`expires_in: 900`, and `source_public_uid`. A replacement UDP session gets a new
-key/epoch; the preceding session remains usable for at most 10s to bridge renewal.
+`expires_in: 900`, `source_public_uid`, and `session_renewal: "udp"`.
+Every accepted UDP packet extends that session's deadline to server-now + 900s.
+It also extends the session's still-live control token/open WSS deadline to
+server-now + 300s. Authentication, timestamp and increasing sequence/source
+timestamp checks all run **before** extension; fresh no-fix samples also qualify.
+Rejected/replayed packets and WSS pings or snapshot requests do not extend it.
+An expired UDP session or control token cannot be revived by UDP traffic.
+
+A replacement UDP session gets a new key/epoch; the preceding session and its
+bound control token remain usable for at most 10s to bridge renewal, and cannot
+be extended. A device therefore needs no periodic HTTPS authentication while
+accepted UDP traffic continues. Gateway tokens retain their fixed 300s lifetime.
+Clients that do not support `session_renewal` may continue periodic authentication.
 At most two UDP sessions/four issued bearer tokens per credential are retained.
 Credential rotation/rebinding/revocation invalidates sessions and WSS through
 generation checks with a cache of at most 1s. Sessions are never persisted.
@@ -179,6 +190,16 @@ The first server message is `hello` with `schemaVersion:1`, `role`, `circuitId`,
 `circuitName` (string or null), `sourcePublicUid` (devices), `epoch`, `canPublish`, `layoutHash`, `expiresAtMs`,
 `leaseMs:3000`. Next comes `flags.snapshot`; gateways also receive current GPS
 samples. `snapshot.request` requests the current flags, without history.
+
+Device `flags.snapshot` messages additionally carry
+`session: {id, expiresAtMs, controlExpiresAtMs, registration}`. Deadlines are
+absolute server Unix milliseconds; `registration` is `pending` or `active`.
+This confirms the current UDP/control lease and approval status over the existing
+authenticated stream, including when no circuit/flags are available. It does not
+extend any flag lease. Clients check the session ID and convert deadlines to
+local monotonic time, accounting for message age. Sending UDP locally is not
+proof of receipt. On WSS failure, imminent lease expiry, LTE reconnect or sequence
+exhaustion, re-authenticate with backoff; server restart discards in-memory sessions.
 
 `GET /v1/layouts/<sha256>` uses bearer Authorization and permits only the caller's
 currently assigned layout. Response is canonical compact JSON, at most 32768
