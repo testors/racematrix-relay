@@ -333,3 +333,33 @@ Session/token/nonce/IP/connection tables have hard limits. Transport ping every
 5s, missing pong >15s closes WSS. Application snapshot requests detect half-open
 streams in clients. Runtime identities, state, nonce caches and tokens are lost
 on server restart; clients reauthenticate and seed fresh state.
+
+### Periodic battery reporting
+
+ESP32 devices POST `/v1/device/info` with their device bearer token after LTE
+connection and every 60 seconds (20 minutes while parked), including when there
+is no GPS fix. Existing
+modem/SIM fields accompany `battery_voltage_mv`: an integer from 2000 to 6000
+(mV) or `null` for an unavailable measurement. Invalid types/ranges return 400.
+Omitting the battery field preserves its previous value and report time for old
+firmware compatibility. Explicit `null` clears the measured voltage.
+
+`devices.list` includes `battery: {voltageMv, reportedAtMs}` or `null` if never
+reported. `reportedAtMs` is the Relay receipt time, not a device-supplied clock.
+Ops shows readings older than 180 seconds as stale. These are board ADC divider
+readings, which USB power can alter on T-A7670X ESP32; they do not establish
+battery presence, remaining percentage or charging state.
+
+### Pit parking
+
+After 5 minutes without driving (10 km/h held for 3 s), an ESP32 parks: it
+stops UDP positions, closes WSS and lets its session lapse. On parking and every
+20 minutes it obtains a new session and POSTs `/v1/device/info` with
+`"parked": true`; on driving it reports `"parked": false` and resumes UDP.
+`parked` is optional and must be a boolean (400 otherwise).
+
+`devices.list` reports `parked: true` while the latest report said parked and
+it is at most 25 minutes old; such a device is also `online`. Any accepted UDP
+position clears parking. A parked pending device keeps its last position for the
+approval list beyond the usual 10 minutes. Parking is held in memory only and
+is lost on Relay restart, like other liveness state.

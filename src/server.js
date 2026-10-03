@@ -12,6 +12,8 @@ const MAX_PEERS = 4096, MAX_SESSIONS = 8192, MAX_TOKENS = 16384, MAX_NONCES = 65
 const TOKEN_MS = 300000, SESSION_MS = 900000;
 const LAYOUT_LEASE_MS = 5000;
 const ONLINE_MS = 90000, PENDING_FIX_MS = 600000, MAX_LISTED = 500;
+// A parked ESP32 stops UDP and reports only every 20 minutes; it stays listed online meanwhile.
+const PARKED_MS = 1500000;
 const emptyFlags = () => ({ fullCourse: null, zones: [], personal: [] });
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
@@ -197,8 +199,12 @@ export class Relay {
         const identity = this.bearer(req);
         if (!identity || identity.role !== 'device') throw fail(401, 'unauthorized');
         const value = key => payload?.[key] === undefined || payload[key] === null || payload[key] === '' ? null : payload[key];
-        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw fail(400, 'invalid device information');
-        this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail') });
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+            (payload.parked !== undefined && typeof payload.parked !== 'boolean')) throw fail(400, 'invalid device information');
+        this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail'),
+          batteryVoltageMv: payload.battery_voltage_mv, reportedAtMs: this.now() });
+        this.touch(identity.uid);
+        if (payload.parked !== undefined) this.seen.get(identity.uid).parked = payload.parked;
         this.credentialCache.delete(identity.uid);
         json(200, { success: true }); return;
       }
@@ -356,6 +362,7 @@ export class Relay {
   touch(uid, sample = null) {
     const entry = this.seen.get(uid) ?? { seenMs: 0, fix: null };
     entry.seenMs = this.now();
+    if (sample) entry.parked = false; // Positions again: driving.
     if (sample && Number.isInteger(sample.latitudeE7)) entry.fix = { latitudeE7: sample.latitudeE7, longitudeE7: sample.longitudeE7,
       speedCkph: sample.speedCkph, timestampUs: sample.timestampUs, receivedAtMs: this.now() };
     this.seen.set(uid, entry);
@@ -384,9 +391,11 @@ export class Relay {
     let numbers = this.store.deviceNumbers(circuitId);
     const text = (value, pattern) => { if (typeof value !== 'string' || !pattern.test(value)) throw fail(400, 'invalid argument'); return value; };
     const owned = row => row.owner_circuit_id === circuitId || (row.owner_circuit_id === null && row.circuit_id === circuitId);
+    const parked = seen => !!seen?.parked && now - seen.seenMs <= PARKED_MS;
     const here = row => {
-      const fix = this.seen.get(row.uid)?.fix;
-      return !!fix && !!layout && now - fix.receivedAtMs <= PENDING_FIX_MS && covers(layout, fix);
+      const seen = this.seen.get(row.uid), fix = seen?.fix;
+      // A parked unit has not moved since its last position.
+      return !!fix && !!layout && (now - fix.receivedAtMs <= PENDING_FIX_MS || parked(seen)) && covers(layout, fix);
     };
     const visible = row => !row.revoked && (row.status === PENDING ? here(row) :
       row.status !== REJECTED && (owned(row) || row.circuit_id === circuitId || numbers.has(row.source_uid) || this.router.circuit(row.source_uid) === circuitId));
@@ -395,9 +404,10 @@ export class Relay {
       const connected = [...this.peers].some(p => p.role === 'device' && p.uid === row.uid);
       return { sourceUid: row.source_uid, hardwareUid: row.hardware_uid, label: row.label, kind: row.hardware_uid.startsWith('mobile:') ? 'mobile' : 'esp32',
         imei: row.imei ?? null, iccid: row.iccid ?? null, phoneTail: row.phone_tail ?? null,
+        battery: row.battery_reported_ms === null ? null : { voltageMv: row.battery_voltage_mv, reportedAtMs: row.battery_reported_ms },
         status: row.status === PENDING ? 'pending' : 'active', owned: owned(row), fixedCircuitId: row.circuit_id,
         number: row.circuit_id === circuitId ? row.number : numbers.get(row.source_uid) ?? null,
-        online: connected || (!!seen && now - seen.seenMs <= ONLINE_MS), lastSeenMs: seen?.seenMs ?? null, createdMs: row.created_ms ?? null,
+        online: connected || (!!seen && now - seen.seenMs <= ONLINE_MS) || parked(seen), parked: parked(seen), lastSeenMs: seen?.seenMs ?? null, createdMs: row.created_ms ?? null,
         onTrack: row.status === PENDING ? here(row) : this.router.circuit(row.source_uid) === circuitId || (row.circuit_id === circuitId && here(row)),
         position: fix ? { latitude: fix.latitudeE7 / 1e7, longitude: fix.longitudeE7 / 1e7,
           speedKph: fix.speedCkph === null ? null : fix.speedCkph / 100, timestampMs: Math.round(fix.timestampUs / 1000), receivedAtMs: fix.receivedAtMs } : null };
