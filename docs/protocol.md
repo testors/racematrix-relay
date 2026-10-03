@@ -146,8 +146,9 @@ A gateway (`role: "gateway"`) whose `hello` lists `capabilities: ["device-admin-
 | `devices.reject` | `sourceUid` | listed pending device |
 | `devices.update` | `sourceUid`, `label` and/or `number` (`null` clears) | `label` owner only; `number` is this circuit's personal-flag number |
 | `devices.revoke` | `sourceUid` | owner only |
+| `devices.settings` | `sourceUid`, `settings` (keys the device reported, same JSON types) | owner only; registered devices that have reported settings |
 
-Each device is `{sourceUid, hardwareUid, imei, iccid, phoneNumber, phoneTail, label, kind, status, owned, fixedCircuitId, number, online, lastSeenMs, createdMs, onTrack, position}`;
+Each device is `{sourceUid, hardwareUid, imei, iccid, phoneNumber, phoneTail, battery, settings, label, kind, status, owned, fixedCircuitId, number, online, parked, lastSeenMs, createdMs, onTrack, position}`;
 keys are never returned. `online` means a control stream is open or the device authenticated/sent GPS within 90 s. Malformed requests close the stream;
 refused operations answer `ok:false`. A device or a non-gateway peer sending `admin.request` is disconnected.
 Devices provisioned by CLI have no owner until `device-owner` assigns one; a fixed-circuit device without an owner is managed by its circuit.
@@ -371,3 +372,42 @@ it is at most 25 minutes old; such a device is also `online`. Any accepted UDP
 position clears parking. A parked pending device keeps its last position for the
 approval list beyond the usual 10 minutes. Parking is held in memory only and
 is lost on Relay restart, like other liveness state.
+
+### Device settings
+
+An ESP32 reports its operator-changeable settings in the same
+`/v1/device/info` POST: with its first report after boot and after every
+change, whether made on its own admin page or asked for by an operator.
+
+```http
+POST /v1/device/info
+{"modem_imei":"863235087085013","battery_voltage_mv":4012,"parked":false,
+ "settings":{"gnssMode":0,"staticHoldCms":0,"agnss":false,"parking":true,"debugLocation":"none","tickLog":false},
+ "settings_revision":1791036000}
+200 {"success":true,"settings_request":{"revision":1791036042,"settings":{"parking":false}}}
+```
+
+`settings` is a flat object of 1-16 keys (`[A-Za-z][A-Za-z0-9]{0,31}`) whose
+values are booleans, integers within ±2147483647 or tokens of up to 32
+characters from `A-Za-z0-9_.-`. The firmware defines the keys; the Relay stores
+the object with its receipt time and forwards it unchanged. A report without
+`settings` keeps the previous one. Anything else returns 400.
+
+`devices.list` carries `settings: {values, reportedAtMs, pending, requestedAtMs}`,
+or `null` for a device that never reported any (older firmware, phones).
+
+A gateway asks for changes with `devices.settings`. Only keys the device
+reported can be named and each value must have the reported value's JSON type;
+the device itself decides whether the value is acceptable. Requests made before
+the device answers are merged. Every request gets a `revision` (Unix seconds,
+strictly increasing per device) and stays pending in the registry until the
+device confirms that revision.
+
+Delivery is `settingsRequest: {revision, settings}` in the device's
+`flags.snapshot` while its stream is open (sent at once when the request is
+made), and `settings_request` in the reply to `/v1/device/info`, which is the
+only path to a parked device: it reports every 20 minutes and when driving
+starts. The device applies what it accepts, then reports its resulting
+`settings` with `settings_revision` set to the handled revision. That clears the
+request even when a value was not accepted; the reported `values` are the
+truth. A device that re-enrolls after a revoke starts without a pending request.

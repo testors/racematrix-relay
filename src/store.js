@@ -18,6 +18,16 @@ export function derivedSourceUid(hardwareUid, length = 8) {
 export const ACTIVE = 0, PENDING = 1, REJECTED = 2;
 const MAX_PENDING = 256;
 const fail = (status, message) => Object.assign(new Error(message), { status });
+// Operator-visible device options: a flat JSON object of booleans, integers and
+// short tokens. The firmware defines the keys; the Relay only stores and
+// forwards them.
+const SETTING_KEY = /^[A-Za-z][A-Za-z0-9]{0,31}$/, SETTING_TEXT = /^[A-Za-z0-9_.-]{0,32}$/;
+export function validSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length >= 1 && entries.length <= 16 && entries.every(([key, v]) => SETTING_KEY.test(key) &&
+    (typeof v === 'boolean' || (Number.isInteger(v) && Math.abs(v) <= 0x7fffffff) || (typeof v === 'string' && SETTING_TEXT.test(v))));
+}
 
 export class Store {
   constructor(directory) {
@@ -67,6 +77,10 @@ export class Store {
     // operators to match a physical unit, never an authentication input.
     for (const column of ['battery_voltage_mv', 'battery_reported_ms']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} INTEGER`);
     for (const column of ['imei', 'iccid', 'phone_tail', 'phone_number']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} TEXT`);
+    // The unit's own settings report, and the changes an operator asked for
+    // until the unit confirms them by revision.
+    for (const column of ['settings', 'settings_request']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} TEXT`);
+    for (const column of ['settings_reported_ms', 'settings_revision', 'settings_requested_ms']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} INTEGER`);
   }
   seal(secret) {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.key, iv);
@@ -200,14 +214,17 @@ export class Store {
     this.db.prepare('UPDATE circuits SET publisher_uid=? WHERE id=?').run(uid, circuitId);
   }
   devices() {
-    return this.db.prepare(`SELECT uid,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id,created_ms,imei,iccid,phone_tail,phone_number,battery_voltage_mv,battery_reported_ms
+    return this.db.prepare(`SELECT uid,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id,created_ms,imei,iccid,phone_tail,phone_number,battery_voltage_mv,battery_reported_ms,
+      settings,settings_reported_ms,settings_request,settings_revision,settings_requested_ms
       FROM credentials WHERE role='device' ORDER BY source_uid`).all();
   }
   deviceBySource(sourceUid) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND source_uid=?").get(sourceUid); }
   deviceByHardware(hardwareUid) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND hardware_uid=?").get(hardwareUid); }
   devicesByImei(imei) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND imei=?").all(imei); }
   // Store full SIM numbers; retain/derive phone_tail for existing Ops clients.
-  setDeviceInfo(uid, { imei = null, iccid = null, phoneTail = null, phoneNumber = null, batteryVoltageMv, reportedAtMs = Date.now() }) {
+  // A settings report replaces the previous one; a report without settings keeps it.
+  // settingsRevision confirms the request with that revision, whatever the unit made of it.
+  setDeviceInfo(uid, { imei = null, iccid = null, phoneTail = null, phoneNumber = null, batteryVoltageMv, settings, settingsRevision, reportedAtMs = Date.now() }) {
     if ((imei !== null && !/^[0-9]{14,17}$/.test(imei)) || (iccid !== null && !/^[0-9]{18,22}$/.test(iccid)) ||
         (phoneTail !== null && !/^[0-9]{4}$/.test(phoneTail)) ||
         (phoneNumber !== null && (typeof phoneNumber !== 'string' || !/^\+?[0-9]{7,15}$/.test(phoneNumber))) ||
@@ -216,10 +233,34 @@ export class Store {
     const batteryPresent = batteryVoltageMv !== undefined;
     if (batteryPresent && ((batteryVoltageMv !== null && (!Number.isInteger(batteryVoltageMv) || batteryVoltageMv < 2000 || batteryVoltageMv > 6000)) ||
         !Number.isSafeInteger(reportedAtMs) || reportedAtMs < 0)) throw fail(400, 'invalid battery information');
+    const settingsPresent = settings !== undefined;
+    if ((settingsPresent && !validSettings(settings)) || (settingsRevision !== undefined &&
+        (!Number.isInteger(settingsRevision) || settingsRevision < 1 || settingsRevision > 0xffffffff))) throw fail(400, 'invalid device settings');
     if (!this.db.prepare(`UPDATE credentials SET imei=?,iccid=?,phone_tail=?,phone_number=?,
       battery_voltage_mv=CASE WHEN ? THEN ? ELSE battery_voltage_mv END,
-      battery_reported_ms=CASE WHEN ? THEN ? ELSE battery_reported_ms END WHERE uid=? AND role='device'`)
-      .run(imei, iccid, phoneTail, phoneNumber, Number(batteryPresent), batteryVoltageMv ?? null, Number(batteryPresent), reportedAtMs, uid).changes) throw fail(404, 'unknown device');
+      battery_reported_ms=CASE WHEN ? THEN ? ELSE battery_reported_ms END,
+      settings=CASE WHEN ? THEN ? ELSE settings END,
+      settings_reported_ms=CASE WHEN ? THEN ? ELSE settings_reported_ms END,
+      settings_request=CASE WHEN settings_revision=? THEN NULL ELSE settings_request END WHERE uid=? AND role='device'`)
+      .run(imei, iccid, phoneTail, phoneNumber, Number(batteryPresent), batteryVoltageMv ?? null, Number(batteryPresent), reportedAtMs,
+        Number(settingsPresent), settingsPresent ? JSON.stringify(settings) : null, Number(settingsPresent), reportedAtMs,
+        settingsRevision ?? null, uid).changes) throw fail(404, 'unknown device');
+  }
+  // Only keys the unit itself reported, with the same JSON type, can be asked
+  // for. Requests made before the unit answers are merged into one.
+  requestDeviceSettings(uid, patch, now = Date.now()) {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT settings,settings_request,settings_revision FROM credentials WHERE uid=? AND role='device'").get(uid);
+      if (!row) throw fail(404, 'unknown device');
+      if (!row.settings) throw fail(409, 'device has not reported its settings');
+      const reported = JSON.parse(row.settings);
+      if (!validSettings(patch) || Object.entries(patch).some(([key, value]) => !Object.hasOwn(reported, key) || typeof value !== typeof reported[key])) throw fail(400, 'invalid device settings');
+      // Seconds since 1970, so a rebuilt registry never reuses a revision the unit has already handled.
+      const revision = Math.max(Math.floor(now / 1000), (row.settings_revision ?? 0) + 1);
+      this.db.prepare('UPDATE credentials SET settings_request=?,settings_revision=?,settings_requested_ms=? WHERE uid=?')
+        .run(JSON.stringify({ ...(row.settings_request ? JSON.parse(row.settings_request) : {}), ...patch }), revision, now, uid);
+      return revision;
+    });
   }
   deviceNumbers(circuitId) {
     return new Map(this.db.prepare('SELECT source_uid,number FROM device_numbers WHERE circuit_id=?').all(circuitId).map(r => [r.source_uid, r.number]));
@@ -242,7 +283,7 @@ export class Store {
         // A revoked device that was reset comes back as a new request under the ID
         // derived from its hardware, which also retires an older SRC-... ID.
         this.db.prepare('DELETE FROM device_numbers WHERE source_uid=?').run(row.source_uid);
-        this.db.prepare('UPDATE credentials SET secret=?,source_uid=?,status=?,revoked=0,generation=generation+1,circuit_id=NULL,number=NULL,owner_circuit_id=NULL,created_ms=? WHERE uid=?')
+        this.db.prepare('UPDATE credentials SET secret=?,source_uid=?,status=?,revoked=0,generation=generation+1,circuit_id=NULL,number=NULL,owner_circuit_id=NULL,settings_request=NULL,created_ms=? WHERE uid=?')
           .run(this.seal(secret), this.allocateSourceUid(hardwareUid), PENDING, now, row.uid);
         row = this.credential(row.uid);
       } else {

@@ -205,11 +205,13 @@ export class Relay {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
             (payload.parked !== undefined && typeof payload.parked !== 'boolean')) throw fail(400, 'invalid device information');
         this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail'), phoneNumber: value('sim_phone_number'),
-          batteryVoltageMv: payload.battery_voltage_mv, reportedAtMs: this.now() });
+          batteryVoltageMv: payload.battery_voltage_mv, settings: payload.settings, settingsRevision: payload.settings_revision, reportedAtMs: this.now() });
         this.touch(identity.uid);
         if (payload.parked !== undefined) this.seen.get(identity.uid).parked = payload.parked;
         this.credentialCache.delete(identity.uid);
-        json(200, { success: true }); return;
+        // A parked unit has no stream: this reply is where it learns of a request.
+        const request = this.settingsRequest(identity.uid);
+        json(200, { success: true, ...(request ? { settings_request: request } : {}) }); return;
       }
       if (req.url === '/v1/device/enroll') {
         let enrolled;
@@ -362,6 +364,11 @@ export class Relay {
       });
     } else throw new Error('unsupported message');
   }
+  // Changes an operator asked for that the unit has not confirmed yet.
+  settingsRequest(uid) {
+    const row = this.credential(uid);
+    return row?.settings_request ? { revision: row.settings_revision, settings: JSON.parse(row.settings_request) } : null;
+  }
   touch(uid, sample = null) {
     const entry = this.seen.get(uid) ?? { seenMs: 0, fix: null };
     entry.seenMs = this.now();
@@ -408,6 +415,8 @@ export class Relay {
       return { sourceUid: row.source_uid, hardwareUid: row.hardware_uid, label: row.label, kind: row.hardware_uid.startsWith('mobile:') ? 'mobile' : 'esp32',
         imei: row.imei ?? null, iccid: row.iccid ?? null, phoneTail: row.phone_tail ?? null, phoneNumber: row.phone_number ?? null,
         battery: row.battery_reported_ms === null ? null : { voltageMv: row.battery_voltage_mv, reportedAtMs: row.battery_reported_ms },
+        settings: row.settings ? { values: JSON.parse(row.settings), reportedAtMs: row.settings_reported_ms,
+          pending: row.settings_request ? JSON.parse(row.settings_request) : null, requestedAtMs: row.settings_request ? row.settings_requested_ms : null } : null,
         status: row.status === PENDING ? 'pending' : 'active', owned: owned(row), fixedCircuitId: row.circuit_id,
         number: row.circuit_id === circuitId ? row.number : numbers.get(row.source_uid) ?? null,
         online: connected || (!!seen && now - seen.seenMs <= ONLINE_MS) || parked(seen), parked: parked(seen), lastSeenMs: seen?.seenMs ?? null, createdMs: row.created_ms ?? null,
@@ -473,6 +482,16 @@ export class Relay {
       if (args.number !== undefined) setNumber(row, number());
       return changed(row);
     }
+    if (op === 'devices.settings') {
+      const row = device();
+      if (row.status !== 0) throw fail(409, 'device is not registered');
+      if (!owned(row)) throw fail(403, 'only the owning circuit can change this device\'s settings');
+      this.store.requestDeviceSettings(row.uid, args.settings, now);
+      this.credentialCache.delete(row.uid);
+      // An open stream delivers it now; otherwise the unit's next report does.
+      for (const peer of this.peers) if (peer.role === 'device' && peer.uid === row.uid) this.sendSnapshot(peer);
+      return changed(row);
+    }
     if (op === 'devices.revoke') {
       const row = device();
       if (!owned(row)) throw fail(403, 'only the owning circuit can revoke this device');
@@ -486,11 +505,13 @@ export class Relay {
     const valid = !!state && state.healthy && state.layoutHash === circuit?.layout_hash && state.validUntilMs > this.now();
     const flags = valid ? state.flags : emptyFlags();
     const session = peer.role === 'device' ? this.sessions.get(peer.sessionId) : null;
+    const settingsRequest = peer.role === 'device' ? this.settingsRequest(peer.uid) : null;
     peer.out.put('flags', { type: 'flags.snapshot', schemaVersion: 1, circuitId: peer.circuitId,
       epoch: state?.epoch ?? 'unavailable', revision: state?.revision ?? 0, layoutHash: circuit?.layout_hash || null,
       validUntilMs: valid ? state.validUntilMs : 0, healthy: valid,
       ...(session ? { session: { id: session.id, expiresAtMs: session.expires, controlExpiresAtMs: session.controlExpires,
         registration: this.credential(peer.uid)?.status === PENDING ? 'pending' : 'active' } } : {}),
+      ...(settingsRequest ? { settingsRequest } : {}),
       flags: { ...flags, personal: peer.role === 'device' ? flags.personal.filter(p => p.number === peer.number) : flags.personal } });
   }
   invalidateFlags(circuitId) {
