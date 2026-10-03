@@ -6,6 +6,49 @@ import { Relay } from '../src/server.js';
 import { crc8 } from '../src/protocol.js';
 import { fixture, session, connect, packet } from './helpers.js';
 
+test('gateway heartbeat sustains one stream beyond token expiry without GPS or reauthentication', async t => {
+  const f = await fixture(t);
+  let authentications = 0;
+  f.relay.server.on('request', req => { if (req.url === '/v1/gateway/session') authentications++; });
+  const auth = await session(f, f.gateway), stream = await connect(f, auth.access_token);
+  const peer = [...f.relay.peers].find(p => p.role === 'gateway');
+  assert.equal(stream.hello.sessionRenewal, 'heartbeat');
+  for (let second = 0; second < 301; second++) { peer.lastPong = f.now(); f.advance(1000); }
+  assert.equal(stream.ws.readyState, WebSocket.OPEN);
+  assert.equal(f.relay.tokens.has(auth.access_token), false);
+  const headers = { authorization: `Bearer ${auth.access_token}` };
+  assert.equal((await fetch(`${f.baseUrl}/v1/layouts/${f.hash}`, { headers })).status, 401);
+  await assert.rejects(connect(f, auth.access_token), /401/);
+  stream.send({ type: 'snapshot.request' });
+  await stream.take(m => m.type === 'flags.snapshot');
+  stream.send({ type: 'admin.request', id: 'after-expiry', op: 'devices.list' });
+  assert.equal((await stream.take(m => m.id === 'after-expiry')).ok, true);
+  const device = await session(f, f.device);
+  for (let second = 1; second <= 900; second++) {
+    peer.lastPong = f.now(); f.advance(1000);
+    f.relay.receiveGps(packet(device, f.now() * 1000, second));
+    peer.out.flush();
+    assert.equal((await stream.take(m => m.type === 'gps')).sequence, second);
+  }
+  assert.equal(authentications, 1);
+  assert.equal(stream.ws.readyState, WebSocket.OPEN);
+  const closed = once(stream.ws, 'close');
+  f.store.revoke(f.gateway.credential_uid); f.advance(1001);
+  await closed;
+});
+
+test('GPS does not keep a gateway alive without pong', async t => {
+  const f = await fixture(t), device = await session(f, f.device);
+  const stream = await connect(f, (await session(f, f.gateway)).access_token);
+  const closed = once(stream.ws, 'close');
+  for (let second = 1; second <= 16; second++) {
+    f.advance(1000);
+    f.relay.receiveGps(packet(device, f.now() * 1000, second));
+  }
+  await closed;
+  assert.equal(f.relay.stats.gpsAccepted, 16);
+});
+
 test('one authentication sustains UDP, bearer and the same WSS beyond their original lifetimes', async t => {
   const f = await fixture(t);
   let authentications = 0;

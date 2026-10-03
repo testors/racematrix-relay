@@ -99,6 +99,9 @@ node bin/relay.js revoke --credential-uid cred_...
 그 세션의 유효한 제어 토큰은 5분으로 만료를 연장한다. 대응 ESP32 펌웨어는 WSS로 만료 시간을
 확인해 정상 전송 중 주기적인 HTTPS 갱신을 하지 않는다. 서버 재시작·연결 장애·만료 시 재인증한다.
 이전 펌웨어/모바일의 주기 갱신도 계속 지원한다.
+Gateway는 최초 인증 후 정상 ping/pong과 현재 권한이 유지되는 동안 WSS를 유지한다.
+새 연결용 토큰은 5분 뒤 만료하지만 이미 인증된 연결을 주기적으로 끊지 않는다.
+대응 daemon은 `hello.sessionRenewal: "heartbeat"`를 확인해 주기적 HTTPS 재인증을 생략한다.
 공장 NVS에 Relay 서킷 ID를 고정하지 않으므로 변경 시 USB 재기록이 필요 없다.
 
 ## USB 없이 기기 등록 (자체 등록)

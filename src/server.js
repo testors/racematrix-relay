@@ -135,8 +135,11 @@ export class Relay {
   }
   controlExpires(identity) {
     // Device tokens and their open streams share the lease of one UDP session.
-    // Gateway tokens retain their original fixed lifetime.
+    // Gateway tokens expire for new connections; established streams use pong health.
     return identity.sessionId === undefined ? identity.expires : this.sessions.get(identity.sessionId)?.controlExpires ?? 0;
+  }
+  streamAuthorized(peer) {
+    return this.authorized(peer) && (peer.role === 'gateway' || this.controlExpires(peer) > this.now());
   }
   bearer(req) {
     let token = req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{43})$/)?.[1];
@@ -273,7 +276,7 @@ export class Relay {
     ws.on('pong', () => { peer.lastPong = this.now(); });
     ws.on('message', (data, binary) => {
       try {
-        if (binary || !this.authorized(peer) || this.controlExpires(peer) <= this.now()) throw new Error('unauthorized message');
+        if (binary || !this.streamAuthorized(peer)) throw new Error('unauthorized message');
         if (this.now() - peer.lastMessage >= 1000) { peer.messages = 0; peer.lastMessage = this.now(); }
         if (++peer.messages > 20) throw new Error('message rate exceeded');
         this.message(peer, JSON.parse(data.toString('utf8')));
@@ -289,7 +292,7 @@ export class Relay {
     peer.out.put('hello', { type: 'hello', schemaVersion: 1, circuitId: peer.circuitId, epoch: peer.epoch,
       circuitName: circuit?.name ?? null,
       role: peer.role, sourcePublicUid: peer.sourceUid, canPublish: peer.canPublish, layoutHash: peer.layoutHash,
-      expiresAtMs: this.controlExpires(peer), leaseMs: LEASE_MS, ...(peer.role === 'gateway' ? { capabilities: ['device-admin-v1'] } : {}) });
+      expiresAtMs: this.controlExpires(peer), leaseMs: LEASE_MS, ...(peer.role === 'gateway' ? { sessionRenewal: 'heartbeat', capabilities: ['device-admin-v1'] } : {}) });
     if (peer.canPublish) {
       this.publishers.set(peer.circuitId, peer); this.router.layouts.delete(peer.circuitId);
       this.invalidateFlags(peer.circuitId); this.refreshRoutes();
@@ -564,7 +567,7 @@ export class Relay {
       this.refreshRoutes();
       for (const peer of this.peers) {
         const circuit = this.store.circuit(peer.circuitId);
-        if (this.controlExpires(peer) <= now || !this.authorized(peer) || now - peer.lastPong > 15000 ||
+        if (!this.streamAuthorized(peer) || now - peer.lastPong > 15000 ||
             (peer.canPublish && circuit?.publisher_uid !== peer.uid)) { peer.ws.terminate(); continue; }
         if (peer.role === 'device') this.syncDevicePeer(peer);
         else if (peer.layoutHash !== (circuit?.layout_hash || null)) {

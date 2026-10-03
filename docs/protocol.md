@@ -56,7 +56,12 @@ An expired UDP session or control token cannot be revived by UDP traffic.
 A replacement UDP session gets a new key/epoch; the preceding session and its
 bound control token remain usable for at most 10s to bridge renewal, and cannot
 be extended. A device therefore needs no periodic HTTPS authentication while
-accepted UDP traffic continues. Gateway tokens retain their fixed 300s lifetime.
+accepted UDP traffic continues. Gateway tokens retain their fixed 300s lifetime
+for HTTP requests and new WebSocket connections. An authenticated gateway stream
+advertises `sessionRenewal: "heartbeat"` in `hello` and stays open beyond
+`expiresAtMs` while transport pong health and current credential authorization
+remain valid. GPS traffic does not sustain a gateway stream. A disconnected
+gateway authenticates again when its original bearer token has expired.
 Clients that do not support `session_renewal` may continue periodic authentication.
 At most two UDP sessions/four issued bearer tokens per credential are retained.
 Credential rotation/rebinding/revocation invalidates sessions and WSS through
@@ -188,7 +193,9 @@ Tokens in query strings are rejected. One active connection per credential.
 
 The first server message is `hello` with `schemaVersion:1`, `role`, `circuitId`,
 `circuitName` (string or null), `sourcePublicUid` (devices), `epoch`, `canPublish`, `layoutHash`, `expiresAtMs`,
-`leaseMs:3000`. Next comes `flags.snapshot`; gateways also receive current GPS
+`leaseMs:3000`. Gateways additionally receive `sessionRenewal:"heartbeat"`:
+`expiresAtMs` limits bearer reuse, not the lifetime of this authenticated stream.
+Next comes `flags.snapshot`; gateways also receive current GPS
 samples. `snapshot.request` requests the current flags, without history.
 
 Device `flags.snapshot` messages additionally carry

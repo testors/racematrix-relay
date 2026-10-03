@@ -11,8 +11,44 @@ const root = path.resolve(process.env.RACEMATRIX_DAEMON_REPO ?? '../racematrix-d
 const { discoverPlugins } = await import(pathToFileURL(`${root}/src/runtime/plugin-registry.js`));
 const { ConfigStore } = await import(pathToFileURL(`${root}/src/runtime/config-store.js`));
 const { PluginRuntime } = await import(pathToFileURL(`${root}/src/runtime/runtime.js`));
+const { default: RelayAdapter } = await import(pathToFileURL(`${root}/plugins/racematrix-relay/plugin.js`));
 await discoverPlugins();
 async function until(fn) { for (let i = 0; i < 150; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('condition timeout'); }
+
+test('gateway carries GPS across 20 minutes without reauthentication, then reauthenticates after disconnect', { timeout: 15000 }, async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const f = await fixture(t);
+  let authentications = 0;
+  f.relay.server.on('request', req => { if (req.url === '/v1/gateway/session') authentications++; });
+  const adapter = new RelayAdapter({ id: 'relay', baseUrl: f.baseUrl, allowInsecure: true, circuitId: 1,
+    credentialUid: f.gateway.credential_uid, credentialSecret: f.gateway.credential_secret });
+  const events = [];
+  adapter.onEvent(event => events.push(event));
+  t.after(() => adapter.stop());
+  await adapter.start(); await until(() => adapter.connected);
+  const ws = adapter.ws, peer = [...f.relay.peers].find(p => p.role === 'gateway');
+  const device = await session(f, f.device);
+  for (let sequence = 1; sequence <= 241; sequence++) {
+    peer.lastPong = f.now(); now += 5000; f.advance(5000);
+    adapter.tick();
+    f.relay.receiveGps(packet(device, now * 1000, sequence));
+    peer.out.flush();
+    await until(() => events.length === sequence);
+  }
+  assert.equal(adapter.heartbeatSession, true);
+  assert.equal(adapter.ws, ws);
+  assert.equal(adapter.stats.connections, 1);
+  assert.equal(authentications, 1);
+  peer.ws.terminate();
+  await until(() => adapter.stats.connections === 2);
+  assert.equal(authentications, 2);
+  assert.notEqual(adapter.ws, ws);
+  now += 1000; f.advance(1000);
+  f.relay.receiveGps(packet(device, now * 1000, 242));
+  for (const gateway of f.relay.peers) if (gateway.role === 'gateway') gateway.out.flush();
+  await until(() => events.length === 242);
+});
 
 test('ESP32 UDP -> relay -> daemon canonical telemetry; live flags -> relay -> device and disconnect invalidation', async t => {
   const f = await fixture(t); f.relay.now = Date.now; f.now = Date.now;
