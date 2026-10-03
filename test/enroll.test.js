@@ -165,19 +165,27 @@ test('a device reports its modem and SIM for operators; a pending unit can be cl
   const gatewaySession = await session(f, f.gateway);
   assert.equal((await info({ modem_imei: '863235087085013' }, gatewaySession.access_token)).status, 401, 'only devices describe themselves');
   assert.equal((await info({ modem_imei: '86323508708501x' })).status, 400);
-  assert.equal((await info({ sim_phone_tail: '01020583047' })).status, 400, 'a full phone number is refused, not truncated');
+  assert.equal((await info({ sim_phone_tail: '01020583047' })).status, 400, 'phone_tail stays four digits; full numbers use sim_phone_number');
+  assert.equal((await info({ sim_phone_number: 1020583047 })).status, 400);
+  assert.equal((await info({ sim_phone_number: '01020583047', sim_phone_tail: '9999' })).status, 400);
+  assert.equal((await info({ sim_phone_number: '1234567890123456' })).status, 400);
   assert.equal((await info({ modem_imei: '863235087085013', sim_iccid: '8982052504122918948', sim_phone_tail: '3047' })).status, 200);
+  assert.equal(f.store.deviceByHardware('esp32:0123456789ab').phone_number, null, 'legacy tail-only reports remain valid');
+  assert.equal((await info({ modem_imei: '863235087085013', sim_iccid: '8982052504122918948', sim_phone_number: '01020583047' })).status, 200);
   const gateway = await connect(f, gatewaySession.access_token);
   assert.equal((await admin(gateway, 'devices.approve', { imei: '863235087085099' })).error, 'no pending device with this IMEI');
   const approved = await admin(gateway, 'devices.approve', { imei: '863235087085013', label: 'Car 3' });
   assert.equal(approved.ok, true);
-  assert.deepEqual([approved.result.imei, approved.result.iccid, approved.result.phoneTail, approved.result.sourceUid],
-    ['863235087085013', '8982052504122918948', '3047', enrolled.source_public_uid]);
+  assert.deepEqual([approved.result.imei, approved.result.iccid, approved.result.phoneTail, approved.result.phoneNumber, approved.result.sourceUid],
+    ['863235087085013', '8982052504122918948', '3047', '01020583047', enrolled.source_public_uid]);
   assert.equal((await admin(gateway, 'devices.approve', { imei: '863235087085013' })).ok, false, 'already approved');
+  assert.equal((await info({ modem_imei: '863235087085013', sim_iccid: '8982052504122918948', sim_phone_number: '+821020583047' })).status, 200);
+  const international = (await admin(gateway, 'devices.list')).result.devices.find(d => d.sourceUid === enrolled.source_public_uid);
+  assert.deepEqual([international.phoneNumber, international.phoneTail], ['+821020583047', '3047']);
   // A SIM swap replaces what was reported; an absent value clears it.
   assert.equal((await info({ modem_imei: '863235087085013', sim_iccid: '8982000000000000001' })).status, 200);
   const listed = (await admin(gateway, 'devices.list')).result.devices.find(d => d.sourceUid === enrolled.source_public_uid);
-  assert.deepEqual([listed.iccid, listed.phoneTail], ['8982000000000000001', null]);
+  assert.deepEqual([listed.iccid, listed.phoneTail, listed.phoneNumber], ['8982000000000000001', null, null]);
   // Two pending units claiming one IMEI cannot be told apart by it.
   for (const mac of ['0123456789ac', '0123456789ad']) {
     const other = secret(), e = await enroll(f, `esp32:${mac}`, other);

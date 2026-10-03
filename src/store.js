@@ -66,7 +66,7 @@ export class Store {
     // What the unit itself reports about its modem and SIM: labels for
     // operators to match a physical unit, never an authentication input.
     for (const column of ['battery_voltage_mv', 'battery_reported_ms']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} INTEGER`);
-    for (const column of ['imei', 'iccid', 'phone_tail']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} TEXT`);
+    for (const column of ['imei', 'iccid', 'phone_tail', 'phone_number']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} TEXT`);
   }
   seal(secret) {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.key, iv);
@@ -200,23 +200,26 @@ export class Store {
     this.db.prepare('UPDATE circuits SET publisher_uid=? WHERE id=?').run(uid, circuitId);
   }
   devices() {
-    return this.db.prepare(`SELECT uid,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id,created_ms,imei,iccid,phone_tail,battery_voltage_mv,battery_reported_ms
+    return this.db.prepare(`SELECT uid,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id,created_ms,imei,iccid,phone_tail,phone_number,battery_voltage_mv,battery_reported_ms
       FROM credentials WHERE role='device' ORDER BY source_uid`).all();
   }
   deviceBySource(sourceUid) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND source_uid=?").get(sourceUid); }
   deviceByHardware(hardwareUid) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND hardware_uid=?").get(hardwareUid); }
   devicesByImei(imei) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND imei=?").all(imei); }
-  // Only the last four digits of a phone number are ever accepted or kept.
-  setDeviceInfo(uid, { imei = null, iccid = null, phoneTail = null, batteryVoltageMv, reportedAtMs = Date.now() }) {
+  // Store full SIM numbers; retain/derive phone_tail for existing Ops clients.
+  setDeviceInfo(uid, { imei = null, iccid = null, phoneTail = null, phoneNumber = null, batteryVoltageMv, reportedAtMs = Date.now() }) {
     if ((imei !== null && !/^[0-9]{14,17}$/.test(imei)) || (iccid !== null && !/^[0-9]{18,22}$/.test(iccid)) ||
-        (phoneTail !== null && !/^[0-9]{4}$/.test(phoneTail))) throw fail(400, 'invalid device information');
+        (phoneTail !== null && !/^[0-9]{4}$/.test(phoneTail)) ||
+        (phoneNumber !== null && (typeof phoneNumber !== 'string' || !/^\+?[0-9]{7,15}$/.test(phoneNumber))) ||
+        (phoneNumber !== null && phoneTail !== null && phoneTail !== phoneNumber.slice(-4))) throw fail(400, 'invalid device information');
+    if (phoneNumber !== null) phoneTail = phoneNumber.slice(-4);
     const batteryPresent = batteryVoltageMv !== undefined;
     if (batteryPresent && ((batteryVoltageMv !== null && (!Number.isInteger(batteryVoltageMv) || batteryVoltageMv < 2000 || batteryVoltageMv > 6000)) ||
         !Number.isSafeInteger(reportedAtMs) || reportedAtMs < 0)) throw fail(400, 'invalid battery information');
-    if (!this.db.prepare(`UPDATE credentials SET imei=?,iccid=?,phone_tail=?,
+    if (!this.db.prepare(`UPDATE credentials SET imei=?,iccid=?,phone_tail=?,phone_number=?,
       battery_voltage_mv=CASE WHEN ? THEN ? ELSE battery_voltage_mv END,
       battery_reported_ms=CASE WHEN ? THEN ? ELSE battery_reported_ms END WHERE uid=? AND role='device'`)
-      .run(imei, iccid, phoneTail, Number(batteryPresent), batteryVoltageMv ?? null, Number(batteryPresent), reportedAtMs, uid).changes) throw fail(404, 'unknown device');
+      .run(imei, iccid, phoneTail, phoneNumber, Number(batteryPresent), batteryVoltageMv ?? null, Number(batteryPresent), reportedAtMs, uid).changes) throw fail(404, 'unknown device');
   }
   deviceNumbers(circuitId) {
     return new Map(this.db.prepare('SELECT source_uid,number FROM device_numbers WHERE circuit_id=?').all(circuitId).map(r => [r.source_uid, r.number]));

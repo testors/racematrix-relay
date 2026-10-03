@@ -204,7 +204,7 @@ export class Relay {
         const value = key => payload?.[key] === undefined || payload[key] === null || payload[key] === '' ? null : payload[key];
         if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
             (payload.parked !== undefined && typeof payload.parked !== 'boolean')) throw fail(400, 'invalid device information');
-        this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail'),
+        this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail'), phoneNumber: value('sim_phone_number'),
           batteryVoltageMv: payload.battery_voltage_mv, reportedAtMs: this.now() });
         this.touch(identity.uid);
         if (payload.parked !== undefined) this.seen.get(identity.uid).parked = payload.parked;
@@ -406,7 +406,7 @@ export class Relay {
       const seen = this.seen.get(row.uid), fix = seen?.fix;
       const connected = [...this.peers].some(p => p.role === 'device' && p.uid === row.uid);
       return { sourceUid: row.source_uid, hardwareUid: row.hardware_uid, label: row.label, kind: row.hardware_uid.startsWith('mobile:') ? 'mobile' : 'esp32',
-        imei: row.imei ?? null, iccid: row.iccid ?? null, phoneTail: row.phone_tail ?? null,
+        imei: row.imei ?? null, iccid: row.iccid ?? null, phoneTail: row.phone_tail ?? null, phoneNumber: row.phone_number ?? null,
         battery: row.battery_reported_ms === null ? null : { voltageMv: row.battery_voltage_mv, reportedAtMs: row.battery_reported_ms },
         status: row.status === PENDING ? 'pending' : 'active', owned: owned(row), fixedCircuitId: row.circuit_id,
         number: row.circuit_id === circuitId ? row.number : numbers.get(row.source_uid) ?? null,
