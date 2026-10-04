@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Store } from '../src/store.js';
 import { fixture, session, connect } from './helpers.js';
 
-const reported = { gnssMode: 0, staticHoldCms: 0, agnss: false, parking: true, debugLocation: 'none', tickLog: false };
+const reported = { gnssMode: 0, staticHoldCms: 0, agnss: false, parking: true, debugLocation: 'none', tickLog: false, sessionSleep: false, sleepCheckMin: 10, sleepLeadMin: 10, sleepUntil: 0 };
 
 test('a device reports its settings; the owner asks for changes and the device confirms them by revision', async t => {
   const f = await fixture(t);
@@ -115,4 +115,21 @@ test('only the owning circuit changes settings; gateways and unregistered units 
   f.store.revoke(f.device.credential_uid);
   assert.equal((await enroll('s'.repeat(43))).status, 201);
   assert.equal(f.store.deviceByHardware('esp32:aabbccddeeff').settings_request, null);
+});
+
+
+test('session sleep configuration and an absolute permission survive relay delivery without changing types', async t => {
+  const f = await fixture(t);
+  f.store.setDeviceOwner(f.device.source_public_uid, 1);
+  const device = await session(f, f.device);
+  const info = body => fetch(`${f.baseUrl}/v1/device/info`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${device.access_token}` }, body: JSON.stringify(body) });
+  await info({ settings: reported });
+  const gateway = await connect(f, (await session(f, f.gateway)).access_token);
+  const settings = { sessionSleep: true, sleepCheckMin: 60, sleepLeadMin: 15, sleepUntil: Math.floor(f.now() / 1000) + 600 };
+  gateway.send({ type: 'admin.request', id: 'sleep', op: 'devices.settings', args: { sourceUid: f.device.source_public_uid, settings } });
+  assert.equal((await gateway.take(m => m.id === 'sleep')).ok, true);
+  const response = await (await info({ parked: true })).json();
+  assert.deepEqual(response.settings_request.settings, settings);
+  await info({ settings: { ...reported, ...settings }, settings_revision: response.settings_request.revision });
+  assert.equal(f.store.deviceBySource(f.device.source_public_uid).settings_request, null);
 });

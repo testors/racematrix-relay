@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Store } from '../src/store.js';
-import { fixture, session, connect } from './helpers.js';
+import { fixture, session, connect, packet } from './helpers.js';
 
 test('battery reports are authenticated, range checked, persistent and visible without GPS', async t => {
   const f = await fixture(t);
@@ -71,4 +71,35 @@ test('a parked device stays online without UDP until its report is 25 minutes ol
   f.advance(2_000);
   gateway = await operator();
   assert.deepEqual([(await listed()).parked, (await listed()).online], [false, false], 'a missed parked report means offline');
+});
+
+
+test('timed sleep liveness is bounded by the confirmed wake time and clears on fresh GPS', async t => {
+  const f = await fixture(t);
+  let device = await session(f, f.device);
+  let gateway = await connect(f, (await session(f, f.gateway)).access_token);
+  const info = body => fetch(`${f.baseUrl}/v1/device/info`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${device.access_token}` }, body: JSON.stringify(body) });
+  let id = 0;
+  const listed = async () => {
+    const requestId = `sleep${++id}`;
+    gateway.send({ type: 'admin.request', id: requestId, op: 'devices.list' });
+    return (await gateway.take(m => m.id === requestId)).result.devices.find(d => d.sourceUid === f.device.source_public_uid);
+  };
+  const until = Math.floor(f.now() / 1000) + 3600;
+  for (const sleep_until of [-1, '123', null, 1.5, until + 61]) assert.equal((await info({ parked: true, sleep_until })).status, 400);
+  assert.equal((await info({ sleep_until: until })).status, 400, 'sleep must also report parked');
+  assert.equal((await info({ external_power: 'battery' })).status, 400, 'unknown is not proof of battery power');
+  assert.equal((await info({ parked: true, sleep_until: until, external_power: 'unknown' })).status, 200);
+  f.advance(30 * 60_000);
+  gateway = await connect(f, (await session(f, f.gateway)).access_token);
+  assert.deepEqual([(await listed()).online, (await listed()).sleepUntilMs], [true, until * 1000]);
+  f.advance(32 * 60_000 + 1000);
+  gateway = await connect(f, (await session(f, f.gateway)).access_token);
+  assert.deepEqual([(await listed()).online, (await listed()).sleepUntilMs], [false, null], 'missed wake cannot remain online indefinitely');
+  device = await session(f, f.device);
+  await info({ parked: true, sleep_until: Math.floor(f.now() / 1000) + 600 });
+  f.relay.receiveGps(packet(device, f.now() * 1000, 1));
+  assert.deepEqual([(await listed()).parked, (await listed()).sleepUntilMs], [false, null]);
+  await info({ parked: false, sleep_until: 0, external_power: 'usb-host' });
+  assert.equal((await listed()).externalPower, 'usb-host');
 });

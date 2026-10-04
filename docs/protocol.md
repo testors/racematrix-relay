@@ -373,6 +373,19 @@ position clears parking. A parked pending device keeps its last position for the
 approval list beyond the usual 10 minutes. Parking is held in memory only and
 is lost on Relay restart, like other liveness state.
 
+For scheduled deep sleep, the final report may include `sleep_until` (integer
+UTC seconds, 0 cancels; a positive value requires `parked: true` and cannot be
+more than 3660 seconds ahead of the Relay clock). Such a unit remains parked
+and online through its wake time plus 120 seconds, instead of the fixed
+25-minute parking allowance. `devices.list` includes `sleepUntilMs` or null.
+Fresh UDP clears both parking and timed sleep. These fields describe reported
+intent; they do not prove the hardware actually entered sleep.
+
+Reports may include `external_power: "usb-host" | "unknown"`, exposed as
+`externalPower` in the directory. The S3 firmware detects native USB host SOF;
+unknown includes chargers and boards with no supported detector. The Relay
+does not infer charging from battery voltage. Both fields are volatile.
+
 ### Device settings
 
 An ESP32 reports its operator-changeable settings in the same
@@ -411,3 +424,12 @@ starts. The device applies what it accepts, then reports its resulting
 `settings` with `settings_revision` set to the handled revision. That clears the
 request even when a value was not accepted; the reported `values` are the
 truth. A device that re-enrolls after a revoke starts without a pending request.
+
+Session-aware firmware additionally reports `sessionSleep` (default false),
+`sleepCheckMin` and `sleepLeadMin` (1–60, default 10 each). These are persisted
+on the device. Ops computes a short-lived `sleepUntil` using the current event,
+entry class and session lifecycle: UTC seconds permit sleep until that time,
+`-1` keeps the unit awake and `0` means no reliable plan. The device keeps this
+permission only in RAM, bounds it with its own interval and monotonic clock,
+and clears it at reboot. It is separate from the `sleep_until` report, which
+announces actual intent to go offline. No timetable logic runs in the Relay.

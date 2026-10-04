@@ -203,11 +203,16 @@ export class Relay {
         if (!identity || identity.role !== 'device') throw fail(401, 'unauthorized');
         const value = key => payload?.[key] === undefined || payload[key] === null || payload[key] === '' ? null : payload[key];
         if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
-            (payload.parked !== undefined && typeof payload.parked !== 'boolean')) throw fail(400, 'invalid device information');
+            (payload.parked !== undefined && typeof payload.parked !== 'boolean') ||
+            (payload.sleep_until !== undefined && (!Number.isInteger(payload.sleep_until) || payload.sleep_until < 0 ||
+              payload.sleep_until > Math.floor(this.now() / 1000) + 3660 || (payload.sleep_until > 0 && payload.parked !== true))) ||
+            (payload.external_power !== undefined && !['usb-host', 'unknown'].includes(payload.external_power))) throw fail(400, 'invalid device information');
         this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail'), phoneNumber: value('sim_phone_number'),
           batteryVoltageMv: payload.battery_voltage_mv, settings: payload.settings, settingsRevision: payload.settings_revision, reportedAtMs: this.now() });
         this.touch(identity.uid);
         if (payload.parked !== undefined) this.seen.get(identity.uid).parked = payload.parked;
+        if (payload.sleep_until !== undefined) this.seen.get(identity.uid).sleepUntilMs = payload.sleep_until * 1000;
+        if (payload.external_power !== undefined) this.seen.get(identity.uid).externalPower = payload.external_power;
         this.credentialCache.delete(identity.uid);
         // A parked unit has no stream: this reply is where it learns of a request.
         const request = this.settingsRequest(identity.uid);
@@ -372,7 +377,7 @@ export class Relay {
   touch(uid, sample = null) {
     const entry = this.seen.get(uid) ?? { seenMs: 0, fix: null };
     entry.seenMs = this.now();
-    if (sample) entry.parked = false; // Positions again: driving.
+    if (sample) { entry.parked = false; entry.sleepUntilMs = 0; } // Positions again: driving.
     if (sample && Number.isInteger(sample.latitudeE7)) entry.fix = { latitudeE7: sample.latitudeE7, longitudeE7: sample.longitudeE7,
       speedCkph: sample.speedCkph, timestampUs: sample.timestampUs, receivedAtMs: this.now() };
     this.seen.set(uid, entry);
@@ -401,7 +406,8 @@ export class Relay {
     let numbers = this.store.deviceNumbers(circuitId);
     const text = (value, pattern) => { if (typeof value !== 'string' || !pattern.test(value)) throw fail(400, 'invalid argument'); return value; };
     const owned = row => row.owner_circuit_id === circuitId || (row.owner_circuit_id === null && row.circuit_id === circuitId);
-    const parked = seen => !!seen?.parked && now - seen.seenMs <= PARKED_MS;
+    const sleeping = seen => !!seen?.parked && seen.sleepUntilMs > 0 && now <= seen.sleepUntilMs + 120000;
+    const parked = seen => !!seen?.parked && (seen.sleepUntilMs > 0 ? sleeping(seen) : now - seen.seenMs <= PARKED_MS);
     const here = row => {
       const seen = this.seen.get(row.uid), fix = seen?.fix;
       // A parked unit has not moved since its last position.
@@ -420,6 +426,7 @@ export class Relay {
         status: row.status === PENDING ? 'pending' : 'active', owned: owned(row), fixedCircuitId: row.circuit_id,
         number: row.circuit_id === circuitId ? row.number : numbers.get(row.source_uid) ?? null,
         online: connected || (!!seen && now - seen.seenMs <= ONLINE_MS) || parked(seen), parked: parked(seen), lastSeenMs: seen?.seenMs ?? null, createdMs: row.created_ms ?? null,
+        sleepUntilMs: sleeping(seen) ? seen.sleepUntilMs : null, externalPower: seen?.externalPower ?? 'unknown',
         onTrack: row.status === PENDING ? here(row) : this.router.circuit(row.source_uid) === circuitId || (row.circuit_id === circuitId && here(row)),
         position: fix ? { latitude: fix.latitudeE7 / 1e7, longitude: fix.longitudeE7 / 1e7,
           speedKph: fix.speedCkph === null ? null : fix.speedCkph / 100, timestampMs: Math.round(fix.timestampUs / 1000), receivedAtMs: fix.receivedAtMs } : null };
