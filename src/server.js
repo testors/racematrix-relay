@@ -188,7 +188,7 @@ export class Relay {
       const chunks = []; let size = 0;
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > 4096) throw fail(413, 'request too large');
+        if (size > (req.url === '/v1/device/info' ? 8192 : 4096)) throw fail(413, 'request too large');
         chunks.push(chunk);
       }
       let payload; try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail(400, 'invalid JSON'); }
@@ -208,7 +208,7 @@ export class Relay {
               payload.sleep_until > Math.floor(this.now() / 1000) + 3660 || (payload.sleep_until > 0 && payload.parked !== true))) ||
             (payload.external_power !== undefined && !['usb-host', 'unknown'].includes(payload.external_power))) throw fail(400, 'invalid device information');
         this.store.setDeviceInfo(identity.uid, { imei: value('modem_imei'), iccid: value('sim_iccid'), phoneTail: value('sim_phone_tail'), phoneNumber: value('sim_phone_number'),
-          batteryVoltageMv: payload.battery_voltage_mv, settings: payload.settings, settingsRevision: payload.settings_revision, reportedAtMs: this.now() });
+          batteryVoltageMv: payload.battery_voltage_mv, settings: payload.settings, settingsRevision: payload.settings_revision, state: payload.state, reportedAtMs: this.now() });
         this.touch(identity.uid);
         if (payload.parked !== undefined) this.seen.get(identity.uid).parked = payload.parked;
         if (payload.sleep_until !== undefined) this.seen.get(identity.uid).sleepUntilMs = payload.sleep_until * 1000;
@@ -423,6 +423,7 @@ export class Relay {
         battery: row.battery_reported_ms === null ? null : { voltageMv: row.battery_voltage_mv, reportedAtMs: row.battery_reported_ms },
         settings: row.settings ? { values: JSON.parse(row.settings), reportedAtMs: row.settings_reported_ms,
           pending: row.settings_request ? JSON.parse(row.settings_request) : null, requestedAtMs: row.settings_request ? row.settings_requested_ms : null } : null,
+        state: row.device_state ? { ...JSON.parse(row.device_state), reportedAtMs: row.state_reported_ms } : null,
         status: row.status === PENDING ? 'pending' : 'active', owned: owned(row), fixedCircuitId: row.circuit_id,
         number: row.circuit_id === circuitId ? row.number : numbers.get(row.source_uid) ?? null,
         online: connected || (!!seen && now - seen.seenMs <= ONLINE_MS) || parked(seen), parked: parked(seen), lastSeenMs: seen?.seenMs ?? null, createdMs: row.created_ms ?? null,

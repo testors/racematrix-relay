@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'n
 import path from 'node:path';
 import { randomBytes, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import { normalizeLayout } from './layout.js';
+import { validDeviceState } from './device-state.js';
 
 const SOURCE_UID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 // 'G' + Base32 (no I/L/O/U, for printed labels); older registries issued SRC-... IDs.
@@ -81,6 +82,8 @@ export class Store {
     // until the unit confirms them by revision.
     for (const column of ['settings', 'settings_request']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} TEXT`);
     for (const column of ['settings_reported_ms', 'settings_revision', 'settings_requested_ms']) if (!columns.has(column)) this.db.exec(`ALTER TABLE credentials ADD COLUMN ${column} INTEGER`);
+    if (!columns.has('device_state')) this.db.exec('ALTER TABLE credentials ADD COLUMN device_state TEXT');
+    if (!columns.has('state_reported_ms')) this.db.exec('ALTER TABLE credentials ADD COLUMN state_reported_ms INTEGER');
   }
   seal(secret) {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.key, iv);
@@ -215,7 +218,7 @@ export class Store {
   }
   devices() {
     return this.db.prepare(`SELECT uid,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id,created_ms,imei,iccid,phone_tail,phone_number,battery_voltage_mv,battery_reported_ms,
-      settings,settings_reported_ms,settings_request,settings_revision,settings_requested_ms
+      settings,settings_reported_ms,settings_request,settings_revision,settings_requested_ms,device_state,state_reported_ms
       FROM credentials WHERE role='device' ORDER BY source_uid`).all();
   }
   deviceBySource(sourceUid) { return this.db.prepare("SELECT * FROM credentials WHERE role='device' AND source_uid=?").get(sourceUid); }
@@ -224,7 +227,7 @@ export class Store {
   // Store full SIM numbers; retain/derive phone_tail for existing Ops clients.
   // A settings report replaces the previous one; a report without settings keeps it.
   // settingsRevision confirms the request with that revision, whatever the unit made of it.
-  setDeviceInfo(uid, { imei = null, iccid = null, phoneTail = null, phoneNumber = null, batteryVoltageMv, settings, settingsRevision, reportedAtMs = Date.now() }) {
+  setDeviceInfo(uid, { imei = null, iccid = null, phoneTail = null, phoneNumber = null, batteryVoltageMv, settings, settingsRevision, state, reportedAtMs = Date.now() }) {
     if ((imei !== null && !/^[0-9]{14,17}$/.test(imei)) || (iccid !== null && !/^[0-9]{18,22}$/.test(iccid)) ||
         (phoneTail !== null && !/^[0-9]{4}$/.test(phoneTail)) ||
         (phoneNumber !== null && (typeof phoneNumber !== 'string' || !/^\+?[0-9]{7,15}$/.test(phoneNumber))) ||
@@ -234,6 +237,14 @@ export class Store {
     if (batteryPresent && ((batteryVoltageMv !== null && (!Number.isInteger(batteryVoltageMv) || batteryVoltageMv < 2000 || batteryVoltageMv > 6000)) ||
         !Number.isSafeInteger(reportedAtMs) || reportedAtMs < 0)) throw fail(400, 'invalid battery information');
     const settingsPresent = settings !== undefined;
+    let statePresent = state !== undefined;
+    if (statePresent && (!validDeviceState(state) || !Number.isSafeInteger(reportedAtMs) || reportedAtMs < 0)) throw fail(400, 'invalid device state');
+    if (statePresent) {
+      const previous = this.db.prepare("SELECT device_state FROM credentials WHERE uid=? AND role='device'").get(uid)?.device_state;
+      const old = previous ? JSON.parse(previous) : null;
+      // A retry or late HTTP response must not make old evidence fresh again.
+      if (old?.bootId === state.bootId && old.sequence >= state.sequence) statePresent = false;
+    }
     if ((settingsPresent && !validSettings(settings)) || (settingsRevision !== undefined &&
         (!Number.isInteger(settingsRevision) || settingsRevision < 1 || settingsRevision > 0xffffffff))) throw fail(400, 'invalid device settings');
     if (!this.db.prepare(`UPDATE credentials SET imei=?,iccid=?,phone_tail=?,phone_number=?,
@@ -241,9 +252,12 @@ export class Store {
       battery_reported_ms=CASE WHEN ? THEN ? ELSE battery_reported_ms END,
       settings=CASE WHEN ? THEN ? ELSE settings END,
       settings_reported_ms=CASE WHEN ? THEN ? ELSE settings_reported_ms END,
+      device_state=CASE WHEN ? THEN ? ELSE device_state END,
+      state_reported_ms=CASE WHEN ? THEN ? ELSE state_reported_ms END,
       settings_request=CASE WHEN settings_revision=? THEN NULL ELSE settings_request END WHERE uid=? AND role='device'`)
       .run(imei, iccid, phoneTail, phoneNumber, Number(batteryPresent), batteryVoltageMv ?? null, Number(batteryPresent), reportedAtMs,
         Number(settingsPresent), settingsPresent ? JSON.stringify(settings) : null, Number(settingsPresent), reportedAtMs,
+        Number(statePresent), statePresent ? JSON.stringify(state) : null, Number(statePresent), reportedAtMs,
         settingsRevision ?? null, uid).changes) throw fail(404, 'unknown device');
   }
   // Only keys the unit itself reported, with the same JSON type, can be asked

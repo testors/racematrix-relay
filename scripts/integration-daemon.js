@@ -15,6 +15,23 @@ const { default: RelayAdapter } = await import(pathToFileURL(`${root}/plugins/ra
 await discoverPlugins();
 async function until(fn) { for (let i = 0; i < 150; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('condition timeout'); }
 
+test('generic future state keys pass through the real daemon registry unchanged', async t => {
+  const f = await fixture(t), device = await session(f, f.device);
+  const state = { schemaVersion: 1, bootId: 'future-boot', sequence: 1, uptimeMs: 250, droppedUpdates: 0,
+    values: { 'future.sensor': 3.25, 'sleep.blocker': 'admin-wifi', 'future.null': null } };
+  const response = await fetch(`${f.baseUrl}/v1/device/info`, { method: 'POST', headers: {
+    'content-type': 'application/json', authorization: `Bearer ${device.access_token}` }, body: JSON.stringify({ state }) });
+  assert.equal(response.status, 200);
+  const adapter = new RelayAdapter({ id: 'relay', baseUrl: f.baseUrl, allowInsecure: true, circuitId: 1,
+    credentialUid: f.gateway.credential_uid, credentialSecret: f.gateway.credential_secret });
+  t.after(() => adapter.stop());
+  await adapter.start();
+  await until(() => adapter.connected && adapter.deviceAdmin);
+  await adapter.refreshDirectory();
+  assert.deepEqual(adapter.gpsDevices().devices.find(d => d.sourceUid === f.device.source_public_uid).state,
+    { ...state, reportedAtMs: f.now() });
+});
+
 test('gateway carries GPS across 20 minutes without reauthentication, then reauthenticates after disconnect', { timeout: 15000 }, async t => {
   let now = Date.now();
   t.mock.method(Date, 'now', () => now);

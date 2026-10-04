@@ -433,3 +433,27 @@ entry class and session lifecycle: UTC seconds permit sleep until that time,
 permission only in RAM, bounds it with its own interval and monotonic clock,
 and clears it at reboot. It is separate from the `sleep_until` report, which
 announces actual intent to go offline. No timetable logic runs in the Relay.
+
+## Generic device state snapshots
+
+`POST /v1/device/info` accepts an optional `state` snapshot, separate from
+settings. Envelope: `schemaVersion: 1`, `bootId` (1–64 ASCII letters/digits/`_-`),
+nonnegative safe-integer `sequence`, `uptimeMs`, `droppedUpdates`, and `values`.
+`values` is a dictionary of at most 64 namespaced keys matching
+`[A-Za-z][A-Za-z0-9_.-]{0,62}` (excluding prototype-related names), holding
+boolean, null, finite numbers within ±(2^53−1), or strings of at most 128 UTF-8
+bytes. Entire snapshot ≤4096 bytes; device-info HTTP body ≤8192 bytes.
+
+Unknown feature keys are preserved. Store full snapshots, not merges; missing
+state on old firmware reports preserves the last snapshot and receipt time.
+Duplicate/older sequences in the same boot do not refresh evidence. A new boot
+resets sequence. Invalid snapshots reject the request without altering prior
+state. `devices.list` returns `state` plus Relay-owned `reportedAtMs`, or null.
+State persists across Relay restarts but never establishes current liveness.
+Do not put secrets in this dictionary or use it to authorize commands.
+
+Daemon transports the dictionary unchanged in the latest device directory;
+Ops validates the envelope and exposes unknown keys in its read-only state
+viewer. New feature keys must not require a Relay/Daemon/UI allowlist change.
+Device cadence remains 60s active / 20min parked, plus existing immediate info
+reports. Refreshing the directory does not wake a sleeping device.
