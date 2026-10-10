@@ -137,13 +137,31 @@ test('authenticated devices and gateways download images whole or by byte range'
   response = await get({}, 'GET', gatewaySession.access_token);
   assert.equal(response.status, 200, 'a gateway may fetch images too');
 
+  // A download renews the device session as a position sample would: the
+  // bearer of a multi-minute transfer must not lapse while no fix is sent.
+  const live = f.relay.sessions.get(deviceSession.session_id);
+  f.advance(240_000);
+  response = await get({ range: 'bytes=0-1023' });
+  assert.equal(response.status, 206);
+  assert.equal(live.controlExpires, f.now() + 300_000, 'a device download renews the control token');
+  assert.equal(live.expires, f.now() + 900_000, 'and the UDP session');
+  f.advance(240_000);
+  response = await get({ range: 'bytes=1024-2047' });
+  assert.equal(response.status, 206, 'the token outlives its original five minutes');
+  const extended = live.controlExpires;
+  f.advance(1_000);
+  response = await fetch(`${f.baseUrl}/v1/firmware/esp32/0.3.0.bin`, { headers: { authorization: `Bearer ${deviceSession.access_token}` } });
+  assert.equal(response.status, 404);
+  assert.equal(live.controlExpires, extended, 'an unknown image is not activity');
+
   // Revoking the device ends its access on the next request.
   f.store.revoke(f.device.credential_uid); f.relay.credentialCache.delete(f.device.credential_uid);
   response = await get();
   assert.equal(response.status, 401);
 
   f.relay.firmware.remove('esp32', '0.2.0');
-  response = await get({}, 'GET', gatewaySession.access_token);
+  // The gateway token from the start has aged out meanwhile (no session to renew): a fresh one.
+  response = await get({}, 'GET', (await session(f, f.gateway)).access_token);
   assert.equal(response.status, 404, 'a removed image is gone at once');
 });
 

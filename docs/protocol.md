@@ -472,8 +472,9 @@ Range: bytes=65536-
 
 `target` is `esp32` or `esp32s3` (the unit's own CPU, chosen by its firmware
 at compile time) and `version` is `X.Y.Z`. The request needs a valid device
-or gateway bearer; a device token stays valid while its UDP positions keep
-arriving, so a multi-minute LTE download does not outlive it. Unknown
+or gateway bearer. A device download renews the device's control token and
+UDP session as a position sample would, so a multi-minute LTE transfer does
+not outlive the token even while the unit sends no fix. Unknown
 target/version answers 404 `unknown firmware`; other paths and methods
 answer 404 as before.
 
@@ -521,7 +522,7 @@ settings.
 Keys the firmware uses in `state.values` (the Relay stores them unchanged and
 needs no allowlist): `firmware.version`, `firmware.target`, `firmware.slot`, `firmware.pendingVerify`,
 `firmware.builtAt`, `network.modemModel`, `ota.state` (`idle`, `requested`, `downloading`,
-`verifying`, `applying`, `rebooting`, `failed`, `blocked`), `ota.version`,
+`verifying`, `rebooting`, `failed`, `blocked`), `ota.version`,
 `ota.receivedBytes`, `ota.totalBytes`, `ota.error`, `ota.blocker`,
 `ota.lastResult` (`success`, `rolled-back`, `interrupted`, `failed`,
 `expired`), `ota.lastVersion`, `ota.lastResultAtS`, `ota.attemptRevision`.

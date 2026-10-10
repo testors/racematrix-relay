@@ -208,6 +208,13 @@ export class Relay {
         if (!identity || (identity.role !== 'device' && identity.role !== 'gateway')) throw fail(401, 'unauthorized');
         const image = this.firmware.get(firmware[1], firmware[2]);
         if (!image) throw fail(404, 'unknown firmware');
+        // A download is session activity like a position sample: the token must
+        // outlive a multi-minute LTE transfer even while the unit sends no fix,
+        // and esp_https_ota cannot swap the bearer mid-transfer.
+        const session = identity.sessionId === undefined ? null : this.sessions.get(identity.sessionId);
+        if (session && !session.superseded && session.controlExpires > this.now()) {
+          session.expires = this.now() + SESSION_MS; session.controlExpires = this.now() + TOKEN_MS;
+        }
         this.serveFirmware(req, res, image); return;
       }
       if (req.method !== 'POST' || !['/api/v1/telemetry/session', '/v1/gateway/session', '/v1/mobile/activate', '/v1/device/enroll', '/v1/device/info'].includes(req.url)) throw fail(404, 'not found');
