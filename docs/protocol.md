@@ -519,8 +519,8 @@ results travel in the generic `state` snapshot (next section), not in
 settings.
 
 Keys the firmware uses in `state.values` (the Relay stores them unchanged and
-needs no allowlist): `fw.version`, `fw.target`, `fw.slot`, `fw.pendingVerify`,
-`fw.builtAt`, `modem.model`, `ota.state` (`idle`, `requested`, `downloading`,
+needs no allowlist): `firmware.version`, `firmware.target`, `firmware.slot`, `firmware.pendingVerify`,
+`firmware.builtAt`, `network.modemModel`, `ota.state` (`idle`, `requested`, `downloading`,
 `verifying`, `applying`, `rebooting`, `failed`, `blocked`), `ota.version`,
 `ota.receivedBytes`, `ota.totalBytes`, `ota.error`, `ota.blocker`,
 `ota.lastResult` (`success`, `rolled-back`, `interrupted`, `failed`,
