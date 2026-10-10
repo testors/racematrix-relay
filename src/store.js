@@ -32,6 +32,7 @@ export function validSettings(value) {
 
 export class Store {
   constructor(directory) {
+    this.directory = directory;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const keyPath = path.join(directory, 'master.key');
     if (!existsSync(keyPath)) {

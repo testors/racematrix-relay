@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { Store } from '../src/store.js';
 import { importCircuitLayout } from '../src/layout.js';
+import { FirmwareStore } from '../src/firmware.js';
 
 const usage = `Usage: node bin/relay.js COMMAND [options]
   circuit-create --circuit-id ID --name NAME
@@ -19,13 +20,16 @@ const usage = `Usage: node bin/relay.js COMMAND [options]
   publisher-bind --circuit-id ID --credential-uid gateway_...
   revoke --credential-uid UID
   list
+  firmware-put --target esp32|esp32s3 --version X.Y.Z --file firmware.bin [--replace]
+  firmware-list
+  firmware-remove --target esp32|esp32s3 --version X.Y.Z
 All commands accept --data-dir (default RELAY_DATA_DIR or ./data). Never print secrets.`;
 let store;
 try {
   process.umask(0o077);
   const { values: v, positionals } = parseArgs({ allowPositionals: true, options: Object.fromEntries([
-    ...['data-dir', 'circuit-id', 'name', 'layout', 'base-layout', 'overlay', 'zone-ids', 'hardware-uid', 'number', 'output', 'source-uid', 'credential-uid', 'import-credential', 'base-url', 'udp-port', 'ttl-minutes'].map(key => [key, { type: 'string' }]),
-    ...['rotate', 'publish', 'help', 'auto'].map(key => [key, { type: 'boolean' }]),
+    ...['data-dir', 'circuit-id', 'name', 'layout', 'base-layout', 'overlay', 'zone-ids', 'hardware-uid', 'number', 'output', 'source-uid', 'credential-uid', 'import-credential', 'base-url', 'udp-port', 'ttl-minutes', 'target', 'version', 'file'].map(key => [key, { type: 'string' }]),
+    ...['rotate', 'publish', 'help', 'auto', 'replace'].map(key => [key, { type: 'boolean' }]),
   ]) });
   if (v.help || !positionals.length) { console.log(usage); process.exit(0); }
   if (positionals.length !== 1) throw new Error('one command is required');
@@ -58,6 +62,11 @@ try {
   else if (command === 'device-number') store.setDeviceNumber(v['source-uid'], circuitId, v.number ?? null);
   else if (command === 'publisher-bind') store.bindPublisher(circuitId, v['credential-uid']);
   else if (command === 'revoke') store.revoke(v['credential-uid']);
+  else if (command === 'firmware-put') {
+    if (!v.file) throw new Error('--file is required');
+    console.log(JSON.stringify(new FirmwareStore(store.directory).put(v.target, v.version, readFileSync(v.file), { replace: v.replace }), null, 2));
+  } else if (command === 'firmware-list') console.log(JSON.stringify(new FirmwareStore(store.directory).list(), null, 2));
+  else if (command === 'firmware-remove') { if (!new FirmwareStore(store.directory).remove(v.target, v.version)) throw new Error('unknown firmware'); }
   else if (command === 'list') console.log(JSON.stringify({
     circuits: store.db.prepare('SELECT * FROM circuits ORDER BY id').all(),
     credentials: store.db.prepare('SELECT uid,role,circuit_id,hardware_uid,source_uid,number,label,generation,revoked,status,owner_circuit_id FROM credentials ORDER BY uid').all(),

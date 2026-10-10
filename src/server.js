@@ -2,11 +2,13 @@ import http from 'node:http';
 import https from 'node:https';
 import dgram from 'node:dgram';
 import { randomBytes } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { decodeGps, verifySignature, validateFlags, canonicalJson, MAX_AGE_MS, LEASE_MS, WS_PROTOCOL, TOKEN_PREFIX, HASH } from './protocol.js';
 import { normalizeLayout } from './layout.js';
 import { CircuitRouter, covers } from './routing.js';
 import { PENDING, REJECTED, SOURCE_UID } from './store.js';
+import { FirmwareStore } from './firmware.js';
 
 const MAX_PEERS = 4096, MAX_SESSIONS = 8192, MAX_TOKENS = 16384, MAX_NONCES = 65536;
 const TOKEN_MS = 300000, SESSION_MS = 900000;
@@ -49,6 +51,7 @@ export class Relay {
     this.sessions = new Map(); this.tokens = new Map(); this.nonces = new Map(); this.rate = new Map(); this.activationRate = new Map();
     this.latest = new Map(); this.peers = new Set(); this.publishers = new Map(); this.flags = new Map(); this.credentialCache = new Map();
     this.router = new CircuitRouter();
+    this.firmware = new FirmwareStore(store.directory);
     this.seen = new Map(); this.layoutCache = new Map();
     this.stats = { gpsAccepted: 0, gpsRejected: 0, flagChanges: 0, flagExpired: 0, authRejected: 0 };
     this.server = tls ? https.createServer(tls) : http.createServer();
@@ -152,6 +155,32 @@ export class Relay {
     const identity = this.tokens.get(token);
     return identity && this.controlExpires(identity) > this.now() && this.authorized(identity) ? this.deviceContext({ ...identity }) : null;
   }
+  /* A firmware image for a device's OTA download: whole, or one byte range so
+   * an interrupted LTE transfer resumes where it stopped. Streamed from disk. */
+  serveFirmware(req, res, image) {
+    const total = image.size, etag = `"${image.sha256}"`;
+    const headers = { 'content-type': 'application/octet-stream', 'accept-ranges': 'bytes', etag,
+      'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' };
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); res.end(); return; }
+    let status = 200, start = 0, end = total - 1;
+    const range = req.headers.range === undefined ? null : /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range));
+    if (range && (range[1] || range[2])) {
+      if (range[1]) { start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), total - 1) : total - 1; }
+      else { start = Math.max(total - Number(range[2]), 0); }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= total) {
+        res.writeHead(416, { ...headers, 'content-range': `bytes */${total}` }); res.end(); return;
+      }
+      status = 206; headers['content-range'] = `bytes ${start}-${end}/${total}`;
+    }
+    // Several ranges or a malformed header: the whole image is a valid answer.
+    headers['content-length'] = end - start + 1;
+    res.writeHead(status, headers);
+    if (req.method === 'HEAD') { res.end(); return; }
+    const stream = createReadStream(image.path, { start, end });
+    stream.on('error', () => res.destroy());
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
+  }
   async request(req, res) {
     const json = (status, value) => {
       res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -172,6 +201,14 @@ export class Relay {
         res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
           etag: `"${hash}"`, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' });
         res.end(body); return;
+      }
+      const firmware = /^\/v1\/firmware\/(esp32|esp32s3)\/(\d{1,3}\.\d{1,3}\.\d{1,3})\.bin$/.exec(req.url);
+      if (firmware && (req.method === 'GET' || req.method === 'HEAD')) {
+        const identity = this.bearer(req);
+        if (!identity || (identity.role !== 'device' && identity.role !== 'gateway')) throw fail(401, 'unauthorized');
+        const image = this.firmware.get(firmware[1], firmware[2]);
+        if (!image) throw fail(404, 'unknown firmware');
+        this.serveFirmware(req, res, image); return;
       }
       if (req.method !== 'POST' || !['/api/v1/telemetry/session', '/v1/gateway/session', '/v1/mobile/activate', '/v1/device/enroll', '/v1/device/info'].includes(req.url)) throw fail(404, 'not found');
       if (req.url === '/v1/mobile/activate' || req.url === '/v1/device/enroll') {

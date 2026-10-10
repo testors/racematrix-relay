@@ -242,6 +242,23 @@ Docker 등록 명령은 실행 중인 컨테이너 안에서 수행한다. 예: 
 레이아웃 파일과 새 credential 출력 디렉터리는 컨테이너에 복사/마운트하여 CLI 경로로 지정한다.
 호스트 CLI로 등록할 때도 **실행 서비스와 같은 data directory**를 지정한다.
 
+### 펌웨어 배포
+
+ESP32 기기의 원격 업데이트 이미지는 data directory의 `firmware/<target>/<version>.bin`에서 서빙한다
+(`GET /v1/firmware/esp32/0.2.0.bin`, 기기·gateway bearer, Range 지원). 릴리스 바이너리를 컨테이너에
+복사한 뒤 CLI로 넣는다. CLI는 이미지 헤더와 앱 descriptor를 읽어 CPU(`esp32`/`esp32s3`)·버전·프로젝트가
+인자와 다르면 거부한다.
+
+```sh
+docker compose cp firmware.bin relay:/tmp/firmware.bin
+docker compose exec relay node bin/relay.js firmware-put --target esp32 --version 0.2.0 --file /tmp/firmware.bin
+docker compose exec relay node bin/relay.js firmware-list
+```
+
+같은 버전을 다시 넣으려면 `--replace`를, 지우려면 `firmware-remove --target esp32 --version 0.2.0`을 쓴다.
+어느 기기에 어떤 버전을 설치할지는 Ops가 `devices.settings`의 `firmwareUpdate` 토큰으로 지시한다
+([protocol.md](docs/protocol.md) "Firmware images for over-the-air updates").
+
 `GET /healthz`는 프로세스/UDP 바인딩 상태다. 세션/트래픽은 메모리에만 있고 재시작하면 재인증한다.
 위치 이력과 플래그는 SQLite에 저장하지 않는다. 등록부는 `relay.sqlite*`와 `master.key`를 함께 보존한다.
 백업은 SQLite의 일관된 backup 또는 서비스 정지 후 디렉터리 복사로 수행하고 키 파일도 함께 보관한다.

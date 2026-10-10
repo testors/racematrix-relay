@@ -457,3 +457,71 @@ Ops validates the envelope and exposes unknown keys in its read-only state
 viewer. New feature keys must not require a Relay/Daemon/UI allowlist change.
 Device cadence remains 60s active / 20min parked, plus existing immediate info
 reports. Refreshing the directory does not wake a sleeping device.
+
+## Firmware images for over-the-air updates
+
+The Relay distributes ESP32 firmware images an operator placed in its data
+directory. It never builds, signs or chooses images: the operator puts a
+release there with the CLI, and Ops tells a unit which version to fetch.
+
+```http
+GET /v1/firmware/<target>/<version>.bin
+Authorization: Bearer <device or gateway token>
+Range: bytes=65536-
+```
+
+`target` is `esp32` or `esp32s3` (the unit's own CPU, chosen by its firmware
+at compile time) and `version` is `X.Y.Z`. The request needs a valid device
+or gateway bearer; a device token stays valid while its UDP positions keep
+arriving, so a multi-minute LTE download does not outlive it. Unknown
+target/version answers 404 `unknown firmware`; other paths and methods
+answer 404 as before.
+
+The answer is `application/octet-stream` with `content-length`,
+`accept-ranges: bytes`, `etag: "<sha256 of the whole image>"` and
+`cache-control: private, max-age=86400`. One `Range` (`bytes=a-b`, `bytes=a-`
+or `bytes=-n`) answers 206 with `content-range: bytes a-b/total`; an
+unsatisfiable range answers 416 with `content-range: bytes */total`; several
+ranges answer the whole image with 200. `If-None-Match` with the current ETag
+answers 304. `HEAD` returns the headers only. The image is streamed from
+disk; the per-IP request rate limit applies as to every other request.
+
+Storage is `<RELAY_DATA_DIR>/firmware/<target>/<version>.bin` next to a
+sidecar `<version>.json`:
+
+```json
+{"target":"esp32","version":"0.2.0","size":1368928,"sha256":"…","projectName":"racematrix-gps-device",
+ "builtAt":"Oct  4 2026 08:53:15","idfVersion":"5.5.0","chipId":0,"putAtMs":1760100000000}
+```
+
+`node bin/relay.js firmware-put --target esp32 --version 0.2.0 --file firmware.bin`
+reads the ESP-IDF image header and app descriptor and refuses an image whose
+chip id does not match the target (`esp32` = 0, `esp32s3` = 9), whose embedded
+version differs from `--version`, or whose project is not
+`racematrix-gps-device`; an existing version is kept unless `--replace` is
+given. `firmware-list` prints the sidecars, `firmware-remove` deletes a
+version. A sidecar that disagrees with the file on disk is not served.
+
+### Update requests through device settings
+
+Session-aware firmware reports the setting `firmwareUpdate`, a token that is
+`none` while idle. A gateway asks for an update with `devices.settings`
+(§ Device settings) and the value `<semver>-<untilUnixSeconds>`, for example
+`0.2.0-1760100000`: the version to install and the UTC second after which the
+request is void. The Relay stores and delivers it like any other settings
+request; the firmware checks the expiry against its own synchronised clock,
+applies its own gates (battery, parking, pending sleep) and reports the
+token it is working on, then `none` again once the attempt ended. A request
+for the version already running is confirmed without doing anything. The
+device confirms the `revision` with its next settings report whether or not
+it accepted the token, so the pending request clears either way; progress and
+results travel in the generic `state` snapshot (next section), not in
+settings.
+
+Keys the firmware uses in `state.values` (the Relay stores them unchanged and
+needs no allowlist): `fw.version`, `fw.target`, `fw.slot`, `fw.pendingVerify`,
+`fw.builtAt`, `modem.model`, `ota.state` (`idle`, `requested`, `downloading`,
+`verifying`, `applying`, `rebooting`, `failed`, `blocked`), `ota.version`,
+`ota.receivedBytes`, `ota.totalBytes`, `ota.error`, `ota.blocker`,
+`ota.lastResult` (`success`, `rolled-back`, `interrupted`, `failed`,
+`expired`), `ota.lastVersion`, `ota.lastResultAtS`, `ota.attemptRevision`.
